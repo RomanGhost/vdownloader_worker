@@ -146,7 +146,7 @@ func Download(ctx context.Context, req Request) (Result, error) {
 	} else {
 		args = append(args,
 			"--merge-output-format", "mp4",
-			"--postprocessor-args", "ffmpeg:-c:a aac",
+			"--postprocessor-args", "Merger+ffmpeg_o:-c:v copy -c:a aac",
 		)
 	}
 

@@ -44,12 +44,21 @@ func (t *Terminal) SelectFormat(available []downloader.FormatInfo) (downloader.F
 		fmt.Fprintf(t.out, "  %s) %s\n", f.Key, f.Label)
 	}
 
-	if len(available) > 0 {
+	// Only show video formats in the table; audio-only formats are covered by predefined option 2.
+	var videoFormats []downloader.FormatInfo
+	for _, f := range available {
+		if !f.IsAudioOnly() {
+			videoFormats = append(videoFormats, f)
+		}
+	}
+
+	const tableOffset = 6
+	if len(videoFormats) > 0 {
 		fmt.Fprintln(t.out)
 		fmt.Fprintf(t.out, "  %-4s %-6s %-6s %-14s %-5s %-6s %-10s %s\n",
 			"No", "ID", "EXT", "RESOLUTION", "FPS", "AUDIO", "SIZE", "NOTE")
 		fmt.Fprintln(t.out, "  "+strings.Repeat("─", 68))
-		for i, f := range available {
+		for i, f := range videoFormats {
 			fps := ""
 			if f.FPS > 0 {
 				fps = fmt.Sprintf("%.0f", f.FPS)
@@ -59,7 +68,7 @@ func (t *Terminal) SelectFormat(available []downloader.FormatInfo) (downloader.F
 				audio = fmt.Sprintf("%dch", f.AudioChannels)
 			}
 			fmt.Fprintf(t.out, "  %-4d %-6s %-6s %-14s %-5s %-6s %-10s %s\n",
-				i+6, f.FormatID, f.Ext, f.Resolution, fps, audio, f.FilesizeStr(), f.FormatNote)
+				i+tableOffset, f.FormatID, f.Ext, f.Resolution, fps, audio, f.FilesizeStr(), f.FormatNote)
 		}
 	}
 
@@ -89,9 +98,9 @@ func (t *Terminal) SelectFormat(available []downloader.FormatInfo) (downloader.F
 	}
 
 	if n, err := strconv.Atoi(choice); err == nil {
-		idx := n - 6
-		if idx >= 0 && idx < len(available) {
-			f := available[idx].ToFormat()
+		idx := n - tableOffset
+		if idx >= 0 && idx < len(videoFormats) {
+			f := videoFormats[idx].ToFormat()
 			if f.MergeAudio {
 				merge, err := t.Prompt("Format has no audio. Merge with best audio? [Y/n]: ")
 				if err != nil {

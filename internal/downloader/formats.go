@@ -74,7 +74,7 @@ func Predefined() []Format {
 	return predefined
 }
 
-// ByKey looks up a format by its menu key.
+// ByKey looks up a predefined format by its menu key.
 // The second return value is false when the key is not found.
 func ByKey(key string) (Format, bool) {
 	for _, f := range predefined {
