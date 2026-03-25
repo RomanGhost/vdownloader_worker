@@ -7,10 +7,57 @@ import (
 
 // Format describes a yt-dlp format selection.
 type Format struct {
-	Key       string // menu key shown to the user
-	Label     string // human-readable description
-	Arg       string // value passed to yt-dlp -f flag
-	AudioOnly bool   // triggers --extract-audio post-processing
+	Key        string // menu key shown to the user
+	Label      string // human-readable description
+	Arg        string // value passed to yt-dlp -f flag
+	AudioOnly  bool   // triggers --extract-audio post-processing
+	MergeAudio bool   // append +bestaudio to Arg before passing to yt-dlp
+}
+
+// FormatInfo holds metadata for a single format returned by yt-dlp -J.
+type FormatInfo struct {
+	FormatID      string
+	Ext           string
+	Resolution    string // e.g. "1920x1080" or "audio only", from yt-dlp's resolution field
+	FPS           float64
+	TBR           float64
+	VCodec        string
+	AudioChannels int // 0 means no audio (null in JSON)
+	Filesize      int64
+	FormatNote    string
+}
+
+// IsAudioOnly reports whether the format has no video stream.
+func (f FormatInfo) IsAudioOnly() bool {
+	return f.VCodec == "none" || f.VCodec == ""
+}
+
+// IsVideoOnly reports whether the format has no audio stream.
+func (f FormatInfo) IsVideoOnly() bool {
+	return f.AudioChannels == 0
+}
+
+// FilesizeStr returns a human-readable filesize.
+func (f FormatInfo) FilesizeStr() string {
+	if f.Filesize == 0 {
+		return "~"
+	}
+	return fmt.Sprintf("%.2fMiB", float64(f.Filesize)/(1024*1024))
+}
+
+// ToFormat converts FormatInfo into a Format ready for downloading.
+func (f FormatInfo) ToFormat() Format {
+	label := f.FormatID
+	if f.FormatNote != "" {
+		label += " " + f.FormatNote
+	}
+	return Format{
+		Key:        f.FormatID,
+		Label:      label,
+		Arg:        f.FormatID,
+		AudioOnly:  f.IsAudioOnly(),
+		MergeAudio: f.IsVideoOnly(),
+	}
 }
 
 // predefined is the ordered list of built-in format presets.

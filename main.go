@@ -56,18 +56,13 @@ func run(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 	}
 
 	fmt.Println("Fetching video info...")
-	title, err := downloader.GetTitle(ctx, url)
+	info, err := downloader.FetchVideoInfo(ctx, url)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Title: %s\n", title)
+	fmt.Printf("Title: %s\n", info.Title)
 
-	fmt.Println("\nAvailable formats:")
-	if err := downloader.ListFormats(ctx, url); err != nil {
-		return err
-	}
-
-	format, err := term.SelectFormat()
+	format, err := term.SelectFormat(info.Formats)
 	if err != nil {
 		return err
 	}
@@ -96,10 +91,11 @@ func run(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 
 	record := &storage.Download{
 		URL:          url,
-		Title:        title,
+		Title:        info.Title,
 		FormatArg:    format.Arg,
 		QualityLabel: format.Label,
 		OutputPath:   result.FilePath,
+
 	}
 	if err := db.Save(ctx, record); err != nil {
 		// Non-fatal: the file is already on disk.

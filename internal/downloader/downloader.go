@@ -3,13 +3,14 @@ package downloader
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
 
-// CheckDependency returns an error when yt-dlp is not on PATH.
+// CheckDependency returns an error when yt-dlp or ffmpeg is not on PATH.
 func CheckDependency() error {
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		return fmt.Errorf(
@@ -19,27 +20,78 @@ func CheckDependency() error {
 				"  releases:         https://github.com/yt-dlp/yt-dlp#installation",
 		)
 	}
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return fmt.Errorf(
+			"ffmpeg not found on PATH (required for merging video and audio)\n" +
+				"  install via winget: winget install ffmpeg\n" +
+				"  install via brew:   brew install ffmpeg\n" +
+				"  releases:           https://ffmpeg.org/download.html",
+		)
+	}
 	return nil
 }
 
-// GetTitle returns the video title for the given URL.
-func GetTitle(ctx context.Context, url string) (string, error) {
-	out, err := exec.CommandContext(ctx, "yt-dlp", "--get-title", "--no-warnings", url).Output()
+// VideoInfo holds the title and available formats for a video.
+type VideoInfo struct {
+	Title   string
+	Formats []FormatInfo
+}
+
+// ytDLPMeta is the subset of yt-dlp's -J output we care about.
+type ytDLPMeta struct {
+	Title   string `json:"title"`
+	Formats []struct {
+		FormatID       string  `json:"format_id"`
+		Ext            string  `json:"ext"`
+		Width          int     `json:"width"`
+		Height         int     `json:"height"`
+		FPS            float64 `json:"fps"`
+		TBR            float64 `json:"tbr"`
+		VCodec         string  `json:"vcodec"`
+		ACodec         string  `json:"acodec"`
+		Filesize       int64   `json:"filesize"`
+		Resolution     string  `json:"resolution"`
+		FilesizeApprox int64   `json:"filesize_approx"`
+		AudioChannels  int     `json:"audio_channels"`
+		FormatNote     string  `json:"format_note"`
+	} `json:"formats"`
+}
+
+// FetchVideoInfo calls yt-dlp -J and returns the video title and available formats.
+// Storyboard (mhtml) entries are excluded.
+func FetchVideoInfo(ctx context.Context, url string) (VideoInfo, error) {
+	out, err := exec.CommandContext(ctx, "yt-dlp", "-J", "--no-warnings", url).Output()
 	if err != nil {
-		return "", fmt.Errorf("get title: %w", err)
+		return VideoInfo{}, fmt.Errorf("fetch video info: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
-}
 
-// ListFormats prints the yt-dlp format table for url to stdout.
-func ListFormats(ctx context.Context, url string) error {
-	cmd := exec.CommandContext(ctx, "yt-dlp", "-F", "--no-warnings", url)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("list formats: %w", err)
+	var meta ytDLPMeta
+	if err := json.Unmarshal(out, &meta); err != nil {
+		return VideoInfo{}, fmt.Errorf("parse video info JSON: %w", err)
 	}
-	return nil
+
+	formats := make([]FormatInfo, 0, len(meta.Formats))
+	for _, f := range meta.Formats {
+		if f.Ext == "mhtml" {
+			continue
+		}
+		size := f.Filesize
+		if size == 0 {
+			size = f.FilesizeApprox
+		}
+		formats = append(formats, FormatInfo{
+			FormatID:      f.FormatID,
+			Ext:           f.Ext,
+			Resolution:    f.Resolution,
+			FPS:           f.FPS,
+			TBR:           f.TBR,
+			VCodec:        f.VCodec,
+			AudioChannels: f.AudioChannels,
+			Filesize:      size,
+			FormatNote:    f.FormatNote,
+		})
+	}
+	return VideoInfo{Title: meta.Title, Formats: formats}, nil
 }
 
 // Request holds all parameters needed for a single download.
@@ -69,8 +121,13 @@ func Download(ctx context.Context, req Request) (Result, error) {
 
 	outputTemplate := req.OutDir + "/%(title)s [%(id)s].%(ext)s"
 
+	formatArg := req.Format.Arg
+	if req.Format.MergeAudio {
+		formatArg += "+bestaudio"
+	}
+
 	args := []string{
-		"-f", req.Format.Arg,
+		"-f", formatArg,
 		"-o", outputTemplate,
 		"--no-warnings",
 		"--progress",
@@ -87,7 +144,10 @@ func Download(ctx context.Context, req Request) (Result, error) {
 			"--audio-quality", "0",
 		)
 	} else {
-		args = append(args, "--merge-output-format", "mp4")
+		args = append(args,
+			"--merge-output-format", "mp4",
+			"--postprocessor-args", "ffmpeg:-c:a aac",
+		)
 	}
 
 	args = append(args, req.URL)

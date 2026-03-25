@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"downloader/internal/downloader"
@@ -35,13 +36,34 @@ func (t *Terminal) Prompt(label string) (string, error) {
 }
 
 // SelectFormat prints the format menu and returns the chosen Format.
-func (t *Terminal) SelectFormat() (downloader.Format, error) {
+// available is the list of formats fetched from yt-dlp -J.
+func (t *Terminal) SelectFormat(available []downloader.FormatInfo) (downloader.Format, error) {
 	fmt.Fprintln(t.out)
-	fmt.Fprintln(t.out, "Download options:")
+	fmt.Fprintln(t.out, "Predefined:")
 	for _, f := range downloader.Predefined() {
 		fmt.Fprintf(t.out, "  %s) %s\n", f.Key, f.Label)
 	}
-	fmt.Fprintln(t.out, "  6) Enter format ID manually")
+
+	if len(available) > 0 {
+		fmt.Fprintln(t.out)
+		fmt.Fprintf(t.out, "  %-4s %-6s %-6s %-14s %-5s %-6s %-10s %s\n",
+			"No", "ID", "EXT", "RESOLUTION", "FPS", "AUDIO", "SIZE", "NOTE")
+		fmt.Fprintln(t.out, "  "+strings.Repeat("─", 68))
+		for i, f := range available {
+			fps := ""
+			if f.FPS > 0 {
+				fps = fmt.Sprintf("%.0f", f.FPS)
+			}
+			audio := "no"
+			if f.AudioChannels > 0 {
+				audio = fmt.Sprintf("%dch", f.AudioChannels)
+			}
+			fmt.Fprintf(t.out, "  %-4d %-6s %-6s %-14s %-5s %-6s %-10s %s\n",
+				i+6, f.FormatID, f.Ext, f.Resolution, fps, audio, f.FilesizeStr(), f.FormatNote)
+		}
+	}
+
+	fmt.Fprintln(t.out, "  0) Enter format ID manually")
 
 	choice, err := t.Prompt("\nChoice [1]: ")
 	if err != nil {
@@ -55,7 +77,7 @@ func (t *Terminal) SelectFormat() (downloader.Format, error) {
 		return f, nil
 	}
 
-	if choice == "6" {
+	if choice == "0" {
 		raw, err := t.Prompt("Format ID (e.g. 137+140 or 22): ")
 		if err != nil {
 			return downloader.Format{}, err
@@ -64,6 +86,21 @@ func (t *Terminal) SelectFormat() (downloader.Format, error) {
 			return downloader.Format{}, fmt.Errorf("format ID cannot be empty")
 		}
 		return downloader.ParseCustom(raw)
+	}
+
+	if n, err := strconv.Atoi(choice); err == nil {
+		idx := n - 6
+		if idx >= 0 && idx < len(available) {
+			f := available[idx].ToFormat()
+			if f.MergeAudio {
+				merge, err := t.Prompt("Format has no audio. Merge with best audio? [Y/n]: ")
+				if err != nil {
+					return downloader.Format{}, err
+				}
+				f.MergeAudio = merge == "" || merge == "y" || merge == "Y"
+			}
+			return f, nil
+		}
 	}
 
 	return downloader.Format{}, fmt.Errorf("invalid choice %q", choice)
