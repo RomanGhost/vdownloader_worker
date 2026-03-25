@@ -82,6 +82,7 @@ func run(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 	fmt.Println("\nDownloading...")
 	result, err := downloader.Download(ctx, downloader.Request{
 		URL:    url,
+		Title:  info.Title,
 		Format: format,
 		OutDir: outDir,
 	})

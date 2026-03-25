@@ -3,11 +3,13 @@ package downloader
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // CheckDependency returns an error when yt-dlp or ffmpeg is not on PATH.
@@ -97,6 +99,7 @@ func FetchVideoInfo(ctx context.Context, url string) (VideoInfo, error) {
 // Request holds all parameters needed for a single download.
 type Request struct {
 	URL    string
+	Title  string
 	Format Format
 	OutDir string
 }
@@ -119,7 +122,10 @@ func Download(ctx context.Context, req Request) (Result, error) {
 	tmp.Close()
 	defer os.Remove(tmpPath)
 
-	outputTemplate := req.OutDir + "/%(title)s [%(id)s].%(ext)s"
+	now := time.Now().Format("20060102_150405")
+	sum := sha256.Sum256([]byte(req.Title))
+	fileHash := fmt.Sprintf("%x", sum[:8])
+	outputTemplate := req.OutDir + "/" + fileHash + now + ".%(ext)s"
 
 	formatArg := req.Format.Arg
 	if req.Format.MergeAudio {
