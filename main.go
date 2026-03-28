@@ -2,24 +2,36 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"downloader/internal/config"
 	"downloader/internal/downloader"
+	"downloader/internal/queue"
 	"downloader/internal/storage"
 	"downloader/internal/ui"
 )
 
-const dbPath = "downloads.db"
-const isCLI = true
-
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	}))
+	cfg := config.Load()
 
-	db, err := storage.Open(dbPath)
+	workerMode := flag.Bool("worker", false, "run as RabbitMQ worker instead of interactive terminal")
+	amqpURL := flag.String("amqp", cfg.AMQPUrl, "RabbitMQ connection URL (env: AMQP_URL)")
+	outDir := flag.String("out", cfg.OutDir, "output directory for downloads (env: OUT_DIR)")
+	dbPath := flag.String("db", cfg.DBPath, "SQLite database file path (env: DB_PATH)")
+	flag.Parse()
+
+	level := slog.LevelWarn
+	if *workerMode {
+		level = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	db, err := storage.Open(*dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -33,18 +45,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	run(ctx, db, isCLI)
-	_ = logger // available for future verbose mode
+	if *workerMode {
+		runWorker(ctx, *amqpURL, *outDir, db, logger)
+		return
+	}
+
+	term := ui.New(os.Stdin, os.Stdout)
+	if err := runCLI(ctx, term, db); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
-func run(ctx context.Context, db *storage.DB, isCLI bool) error {
-	if isCLI {
-		term := ui.New(os.Stdin, os.Stdout)
-		if err := runCLI(ctx, term, db); err != nil {
-			return err
-		}
+func runWorker(ctx context.Context, amqpURL, outDir string, db *storage.DB, log *slog.Logger) {
+	if err := downloader.CheckDependency(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
-	return nil
+
+	w, err := queue.NewWorker(amqpURL, db, outDir, log)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer w.Close()
+
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	log.Info("starting worker", "amqp", amqpURL, "out_dir", outDir)
+	if err := w.Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "worker error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func runCLI(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
@@ -103,7 +136,6 @@ func runCLI(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 		OutputPath:   result.FilePath,
 	}
 	if err := db.Save(ctx, record); err != nil {
-		// Non-fatal: the file is already on disk.
 		fmt.Fprintf(os.Stderr, "warning: failed to save download record: %v\n", err)
 	}
 

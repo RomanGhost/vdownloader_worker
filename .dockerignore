@@ -3,3 +3,4 @@ downloads/
 gf
 out.txt
 *.db
+.env
