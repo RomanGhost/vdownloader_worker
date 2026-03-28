@@ -1,104 +1,103 @@
-// Package storage records every download in a JSON file acting as a simple
-// append-only database. The schema is intentionally compatible with a future
-// SQLite or Postgres migration: callers interact only through DB methods.
+// Package storage records every download in a SQLite database.
+// Callers interact only through DB methods; the schema is versioned via Migrate.
 package storage
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
 	"fmt"
-	"os"
-	"sync"
 	"time"
+
+	_ "modernc.org/sqlite" // register "sqlite" driver
 )
 
-// DB is a JSON-file backed store. All public methods are safe for concurrent
-// use, though yt-dlp is typically run one at a time.
+// DB wraps a SQLite connection pool.
 type DB struct {
-	mu   sync.Mutex
-	path string
+	db *sql.DB
 }
 
-// Open opens (or creates) the JSON database at path.
+// Open opens (or creates) the SQLite database at path.
 func Open(path string) (*DB, error) {
-	// Ensure the file exists so that List never fails on a fresh run.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644)
+	conn, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open database %q: %w", path, err)
 	}
-	f.Close()
-	return &DB{path: path}, nil
+	// SQLite performs best with a single writer connection.
+	conn.SetMaxOpenConns(1)
+	return &DB{db: conn}, nil
 }
 
-// Close is a no-op for the JSON backend; it exists so callers can use defer db.Close().
-func (s *DB) Close() error { return nil }
+// Close closes the underlying database connection.
+func (s *DB) Close() error { return s.db.Close() }
 
-// Migrate is a no-op for the JSON backend; it exists to satisfy the same
-// interface that a SQL backend would require.
-func (s *DB) Migrate(_ context.Context) error { return nil }
-
-// Save appends dl to the database and sets dl.ID and dl.CreatedAt.
-func (s *DB) Save(_ context.Context, dl *Download) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	records, err := s.readAll()
-	if err != nil {
-		return err
+// Migrate creates the downloads table if it does not exist.
+func (s *DB) Migrate(_ context.Context) error {
+	const ddl = `
+	CREATE TABLE IF NOT EXISTS downloads (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		url           TEXT    NOT NULL,
+		title         TEXT    NOT NULL,
+		file_name     TEXT    NOT NULL DEFAULT '',
+		format_arg    TEXT    NOT NULL DEFAULT '',
+		quality_label TEXT    NOT NULL DEFAULT '',
+		output_path   TEXT    NOT NULL DEFAULT '',
+		created_at    DATETIME NOT NULL
+	);`
+	if _, err := s.db.Exec(ddl); err != nil {
+		return fmt.Errorf("migrate: %w", err)
 	}
+	return nil
+}
 
+// Save inserts dl into the database and sets dl.ID and dl.CreatedAt.
+func (s *DB) Save(ctx context.Context, dl *Download) error {
 	dl.CreatedAt = time.Now()
-	if len(records) > 0 {
-		dl.ID = records[len(records)-1].ID + 1
-	} else {
-		dl.ID = 1
-	}
 
-	records = append(records, *dl)
-	return s.writeAll(records)
+	const q = `
+	INSERT INTO downloads (url, title, file_name, format_arg, quality_label, output_path, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
+	RETURNING id`
+
+	row := s.db.QueryRowContext(ctx, q,
+		dl.URL,
+		dl.Title,
+		dl.FileName,
+		dl.FormatArg,
+		dl.QualityLabel,
+		dl.OutputPath,
+		dl.CreatedAt.UTC().Format(time.RFC3339),
+	)
+	if err := row.Scan(&dl.ID); err != nil {
+		return fmt.Errorf("save download: %w", err)
+	}
+	return nil
 }
 
 // List returns all download records ordered by most recent first.
-func (s *DB) List(_ context.Context) ([]Download, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *DB) List(ctx context.Context) ([]Download, error) {
+	const q = `
+	SELECT id, url, title, file_name, format_arg, quality_label, output_path, created_at
+	FROM downloads
+	ORDER BY id DESC`
 
-	records, err := s.readAll()
+	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list downloads: %w", err)
 	}
+	defer rows.Close()
 
-	// Reverse in-place so index 0 is the newest.
-	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
-		records[i], records[j] = records[j], records[i]
-	}
-	return records, nil
-}
-
-// readAll deserialises the JSON file. Callers must hold s.mu.
-func (s *DB) readAll() ([]Download, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		return nil, fmt.Errorf("read database: %w", err)
-	}
-	if len(data) == 0 {
-		return nil, nil
-	}
 	var records []Download
-	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, fmt.Errorf("parse database: %w", err)
+	for rows.Next() {
+		var dl Download
+		var createdAt string
+		if err := rows.Scan(
+			&dl.ID, &dl.URL, &dl.Title, &dl.FileName,
+			&dl.FormatArg, &dl.QualityLabel, &dl.OutputPath, &createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan download: %w", err)
+		}
+		dl.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		records = append(records, dl)
 	}
-	return records, nil
-}
-
-// writeAll serialises records back to the JSON file. Callers must hold s.mu.
-func (s *DB) writeAll(records []Download) error {
-	data, err := json.MarshalIndent(records, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal database: %w", err)
-	}
-	if err := os.WriteFile(s.path, data, 0o644); err != nil {
-		return fmt.Errorf("write database: %w", err)
-	}
-	return nil
+	return records, rows.Err()
 }

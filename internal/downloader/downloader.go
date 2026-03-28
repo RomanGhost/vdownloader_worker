@@ -122,10 +122,10 @@ func Download(ctx context.Context, req Request) (Result, error) {
 	tmp.Close()
 	defer os.Remove(tmpPath)
 
-	now := time.Now().Format("20060102_150405")
+	now := time.Now().Format("01022006_150405")
 	sum := sha256.Sum256([]byte(req.Title))
 	fileHash := fmt.Sprintf("%x", sum[:8])
-	outputTemplate := req.OutDir + "/" + fileHash + now + ".%(ext)s"
+	outputTemplate := req.OutDir + "/" + fileHash + "_" + now + ".%(ext)s"
 
 	formatArg := req.Format.Arg
 	if req.Format.MergeAudio {

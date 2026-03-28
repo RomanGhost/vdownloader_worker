@@ -12,6 +12,7 @@ import (
 )
 
 const dbPath = "downloads.db"
+const isCLI = true
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -32,17 +33,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	term := ui.New(os.Stdin, os.Stdout)
-
-	if err := run(ctx, term, db); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
+	run(ctx, db, isCLI)
 	_ = logger // available for future verbose mode
 }
 
-func run(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
+func run(ctx context.Context, db *storage.DB, isCLI bool) error {
+	if isCLI {
+		term := ui.New(os.Stdin, os.Stdout)
+		if err := runCLI(ctx, term, db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runCLI(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 	if err := downloader.CheckDependency(); err != nil {
 		return err
 	}
@@ -96,7 +101,6 @@ func run(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 		FormatArg:    format.Arg,
 		QualityLabel: format.Label,
 		OutputPath:   result.FilePath,
-
 	}
 	if err := db.Save(ctx, record); err != nil {
 		// Non-fatal: the file is already on disk.
