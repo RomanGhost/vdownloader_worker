@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"downloader/internal/downloader"
@@ -16,10 +17,10 @@ import (
 // Worker consumes RabbitMQ queues and runs yt-dlp downloads.
 //
 // Flow:
-//   - video.get_formats  → FetchVideoInfo → RPC reply with formats   (sync)
-//   - video.download     → save DB record → RPC reply with job_id    (sync)
-//                        → yt-dlp download in goroutine               (async)
-//                        → publish to video.completed when done       (async)
+//   - video.get_formats → FetchVideoInfo → RPC reply with formats        (sync)
+//   - video.download    → save DB record → RPC reply with job_id         (sync)
+//                       → yt-dlp download in goroutine                    (async)
+//                       → publish CompletedEvent{file_id, status} when done (async)
 type Worker struct {
 	conn   *amqp.Connection
 	ch     *amqp.Channel
@@ -136,8 +137,8 @@ func (w *Worker) handleGetFormats(ctx context.Context, msg amqp.Delivery) {
 	msg.Ack(false)
 }
 
-// handleDownload: sync part — save record, reply with job_id.
-// async part — run yt-dlp in goroutine, publish CompletedEvent when done.
+// handleDownload: sync part — save record with UUID file_id, reply with job_id.
+// async part — run yt-dlp, update DB, publish CompletedEvent.
 func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 	var req DownloadRequest
 	if err := json.Unmarshal(msg.Body, &req); err != nil {
@@ -146,17 +147,14 @@ func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 		return
 	}
 
-	outDir := req.OutDir
-	if outDir == "" {
-		outDir = w.outDir
-	}
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	if err := os.MkdirAll(w.outDir, 0o755); err != nil {
 		w.replyErr(msg, fmt.Errorf("create out dir: %w", err))
 		return
 	}
 
 	// Persist a pending record now to generate the job ID before downloading.
 	record := &storage.Download{
+		FileID:       uuid.NewString(),
 		URL:          req.URL,
 		Title:        req.Title,
 		FormatArg:    req.FormatArg,
@@ -175,8 +173,8 @@ func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 	}
 	msg.Ack(false)
 
-	// ── Asynchronous: download then publish completion ────────────────────────
-	go func(jobID int64) {
+	// ── Asynchronous: download → update DB → publish completion ──────────────
+	go func(jobID int64, fileID string) {
 		result, err := downloader.Download(context.Background(), downloader.Request{
 			URL:   req.URL,
 			Title: req.Title,
@@ -186,22 +184,26 @@ func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 				AudioOnly:  req.AudioOnly,
 				MergeAudio: req.MergeAudio,
 			},
-			OutDir: outDir,
+			OutDir: w.outDir,
 		})
 
-		event := CompletedEvent{JobID: jobID}
+		event := CompletedEvent{JobID: jobID, FileID: fileID}
 		if err != nil {
+			event.Status = StatusFailed
 			event.Error = err.Error()
 			w.log.Error("download failed", "job_id", jobID, "err", err)
 		} else {
-			event.OutputPath = result.FilePath
-			w.log.Info("download done", "job_id", jobID, "path", result.FilePath)
+			event.Status = StatusReady
+			if dbErr := w.db.UpdateOutputPath(context.Background(), jobID, result.FilePath); dbErr != nil {
+				w.log.Error("update output path", "job_id", jobID, "err", dbErr)
+			}
+			w.log.Info("download done", "job_id", jobID, "file_id", fileID)
 		}
 
 		if err := w.publish(QueueCompleted, event); err != nil {
 			w.log.Error("publish completed", "job_id", jobID, "err", err)
 		}
-	}(record.ID)
+	}(record.ID, record.FileID)
 }
 
 // reply sends a JSON response to msg.ReplyTo preserving the correlation ID.

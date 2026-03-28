@@ -35,6 +35,7 @@ type FormatMessage struct {
 }
 
 // DownloadRequest is sent by the client to start a download job.
+// The output directory is determined by the worker (OUT_DIR env).
 type DownloadRequest struct {
 	URL          string `json:"url"`
 	Title        string `json:"title"`
@@ -42,7 +43,6 @@ type DownloadRequest struct {
 	QualityLabel string `json:"quality_label"`
 	AudioOnly    bool   `json:"audio_only"`
 	MergeAudio   bool   `json:"merge_audio"`
-	OutDir       string `json:"out_dir"` // empty → worker default
 }
 
 // DownloadResponse is the synchronous RPC reply: the job identifier.
@@ -51,10 +51,16 @@ type DownloadResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// Status values for CompletedEvent.
+const (
+	StatusReady  = "ready"
+	StatusFailed = "failed"
+)
+
 // CompletedEvent is published to QueueCompleted when the download finishes.
-// Error is non-empty when the download failed.
 type CompletedEvent struct {
-	JobID      int64  `json:"job_id"`
-	OutputPath string `json:"output_path,omitempty"`
-	Error      string `json:"error,omitempty"`
+	JobID  int64  `json:"job_id"`
+	FileID string `json:"file_id,omitempty"`
+	Status string `json:"status"` // "ready" | "failed"
+	Error  string `json:"error,omitempty"`
 }

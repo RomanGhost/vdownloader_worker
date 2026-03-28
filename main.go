@@ -11,6 +11,7 @@ import (
 
 	"downloader/internal/config"
 	"downloader/internal/downloader"
+	"downloader/internal/fileserver"
 	"downloader/internal/queue"
 	"downloader/internal/storage"
 	"downloader/internal/ui"
@@ -23,6 +24,7 @@ func main() {
 	amqpURL := flag.String("amqp", cfg.AMQPUrl, "RabbitMQ connection URL (env: AMQP_URL)")
 	outDir := flag.String("out", cfg.OutDir, "output directory for downloads (env: OUT_DIR)")
 	dbPath := flag.String("db", cfg.DBPath, "SQLite database file path (env: DB_PATH)")
+	fsAddr := flag.String("fs-addr", cfg.FileServerAddr, "file server listen address (env: FILE_SERVER_ADDR)")
 	flag.Parse()
 
 	level := slog.LevelWarn
@@ -46,7 +48,7 @@ func main() {
 	}
 
 	if *workerMode {
-		runWorker(ctx, *amqpURL, *outDir, db, logger)
+		runWorker(ctx, *amqpURL, *outDir, *fsAddr, db, logger)
 		return
 	}
 
@@ -57,11 +59,14 @@ func main() {
 	}
 }
 
-func runWorker(ctx context.Context, amqpURL, outDir string, db *storage.DB, log *slog.Logger) {
+func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, db *storage.DB, log *slog.Logger) {
 	if err := downloader.CheckDependency(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+
+	fs := fileserver.New(fsAddr, db, log)
+	fs.Start()
 
 	w, err := queue.NewWorker(amqpURL, db, outDir, log)
 	if err != nil {
@@ -77,6 +82,11 @@ func runWorker(ctx context.Context, amqpURL, outDir string, db *storage.DB, log 
 	if err := w.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "worker error: %v\n", err)
 		os.Exit(1)
+	}
+
+	shutCtx := context.Background()
+	if err := fs.Shutdown(shutCtx); err != nil {
+		log.Error("file server shutdown", "err", err)
 	}
 }
 

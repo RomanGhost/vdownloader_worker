@@ -1,3 +1,4 @@
 *.db
 downloads/
 .env
+*.exe

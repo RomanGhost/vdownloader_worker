@@ -24,6 +24,10 @@ type Config struct {
 	// OutDir is the directory where downloaded files are stored.
 	// Env: OUT_DIR  Default: ./downloads
 	OutDir string
+
+	// FileServerAddr is the address the HTTP file server listens on.
+	// Env: FILE_SERVER_ADDR  Default: :8080
+	FileServerAddr string
 }
 
 // Load reads .env (if present), then environment variables, then falls back to defaults.
@@ -33,9 +37,10 @@ func Load() Config {
 	_ = godotenv.Load()
 
 	return Config{
-		DBPath:  getenv("DB_PATH", "downloads.db"),
-		AMQPUrl: getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
-		OutDir:  getenv("OUT_DIR", "./downloads"),
+		DBPath:         getenv("DB_PATH", "downloads.db"),
+		AMQPUrl:        getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+		OutDir:         getenv("OUT_DIR", "./downloads"),
+		FileServerAddr: getenv("FILE_SERVER_ADDR", ":8080"),
 	}
 }
 

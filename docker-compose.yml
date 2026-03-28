@@ -1,0 +1,33 @@
+services:
+  worker:
+    build: .
+    command: ["./downloader", "-worker"]
+    env_file: .env
+    ports: 
+      - "8080:8080"
+    environment:
+      - AMQP_URL=amqp://guest:guest@rabbitmq:5672/
+      - OUT_DIR=/downloads
+    volumes:
+      - downloads:/downloads
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  downloads:
+  rabbitmq_data:
