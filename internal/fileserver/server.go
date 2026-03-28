@@ -7,10 +7,23 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"downloader/internal/storage"
 )
+
+// invalidChars matches characters forbidden in filenames on Windows and Unix.
+// Windows forbids: \ / : * ? " < > |  and control characters (0x00–0x1F).
+// Unix forbids: / and null byte.
+// Covering the superset keeps names portable across both.
+var invalidChars = regexp.MustCompile(`[\\/:*?"<>|\x00-\x1F]`)
+
+// sanitizeFilename replaces forbidden characters with "_" and trims surrounding spaces.
+func sanitizeFilename(s string) string {
+	s = invalidChars.ReplaceAllString(s, "_")
+	return strings.TrimSpace(s)
+}
 
 // Server is an HTTP file server backed by the downloads database.
 type Server struct {
@@ -61,7 +74,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Disposition",
-		`attachment; filename="`+filepath.Base(dl.OutputPath)+`"`)
+	ext := filepath.Ext(dl.OutputPath)
+	name := sanitizeFilename(dl.Title) + ext
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeFile(w, r, dl.OutputPath)
 }
