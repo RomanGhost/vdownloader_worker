@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 
 	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -22,11 +23,13 @@ import (
 //                       → yt-dlp download in goroutine                    (async)
 //                       → publish CompletedEvent{file_id, status} when done (async)
 type Worker struct {
-	conn   *amqp.Connection
-	ch     *amqp.Channel
-	db     *storage.DB
-	outDir string
-	log    *slog.Logger
+	conn    *amqp.Connection
+	ch      *amqp.Channel  // consumer channel (main goroutine only)
+	pubCh   *amqp.Channel  // publish channel (shared across goroutines, guarded by pubMu)
+	pubMu   sync.Mutex
+	db      *storage.DB
+	outDir  string
+	log     *slog.Logger
 }
 
 // NewWorker dials RabbitMQ, opens a channel, and declares all required queues.
@@ -42,15 +45,23 @@ func NewWorker(amqpURL string, db *storage.DB, outDir string, log *slog.Logger) 
 		return nil, fmt.Errorf("open channel: %w", err)
 	}
 
+	pubCh, err := conn.Channel()
+	if err != nil {
+		ch.Close()
+		conn.Close()
+		return nil, fmt.Errorf("open publish channel: %w", err)
+	}
+
 	for _, name := range []string{QueueGetFormats, QueueDownload, QueueCompleted} {
 		if _, err := ch.QueueDeclare(name, true, false, false, false, nil); err != nil {
+			pubCh.Close()
 			ch.Close()
 			conn.Close()
 			return nil, fmt.Errorf("declare queue %q: %w", name, err)
 		}
 	}
 
-	return &Worker{conn: conn, ch: ch, db: db, outDir: outDir, log: log}, nil
+	return &Worker{conn: conn, ch: ch, pubCh: pubCh, db: db, outDir: outDir, log: log}, nil
 }
 
 // Run blocks until ctx is cancelled, processing one message at a time per queue.
@@ -90,8 +101,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// Close shuts down the AMQP channel and connection gracefully.
+// Close shuts down the AMQP channels and connection gracefully.
 func (w *Worker) Close() {
+	w.pubCh.Close()
 	w.ch.Close()
 	w.conn.Close()
 }
@@ -217,7 +229,9 @@ func (w *Worker) reply(msg amqp.Delivery, body any) error {
 	if err != nil {
 		return err
 	}
-	return w.ch.PublishWithContext(context.Background(), "", msg.ReplyTo, false, false,
+	w.pubMu.Lock()
+	defer w.pubMu.Unlock()
+	return w.pubCh.PublishWithContext(context.Background(), "", msg.ReplyTo, false, false,
 		amqp.Publishing{
 			ContentType:   "application/json",
 			CorrelationId: msg.CorrelationId,
@@ -238,12 +252,15 @@ func (w *Worker) replyErr(msg amqp.Delivery, err error) {
 }
 
 // publish sends a JSON message to a named queue.
+// Safe to call from multiple goroutines concurrently.
 func (w *Worker) publish(queue string, body any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	return w.ch.PublishWithContext(context.Background(), "", queue, false, false,
+	w.pubMu.Lock()
+	defer w.pubMu.Unlock()
+	return w.pubCh.PublishWithContext(context.Background(), "", queue, false, false,
 		amqp.Publishing{
 			ContentType: "application/json",
 			Body:        data,
