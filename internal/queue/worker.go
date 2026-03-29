@@ -184,7 +184,8 @@ func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 				AudioOnly:  req.AudioOnly,
 				MergeAudio: req.MergeAudio,
 			},
-			OutDir: w.outDir,
+			OutDir:       w.outDir,
+			OutputFormat: req.OutputFormat,
 		})
 
 		event := CompletedEvent{JobID: jobID, FileID: fileID}

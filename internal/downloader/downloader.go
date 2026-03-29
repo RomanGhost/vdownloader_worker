@@ -98,10 +98,11 @@ func FetchVideoInfo(ctx context.Context, url string) (VideoInfo, error) {
 
 // Request holds all parameters needed for a single download.
 type Request struct {
-	URL    string
-	Title  string
-	Format Format
-	OutDir string
+	URL          string
+	Title        string
+	Format       Format
+	OutDir       string
+	OutputFormat string // container remux: "mp4", "webm", "mkv", etc. Empty = keep original.
 }
 
 // Result contains information about a completed download.
@@ -149,10 +150,14 @@ func Download(ctx context.Context, req Request) (Result, error) {
 			"--audio-format", "mp3",
 			"--audio-quality", "0",
 		)
-	} else {
+	} else if req.OutputFormat != "" {
+		audioCodec := "copy"
+		if req.OutputFormat == "mp4" || req.OutputFormat == "mov" || req.OutputFormat == "avi" {
+			audioCodec = "aac"
+		}
 		args = append(args,
-			"--merge-output-format", "mp4",
-			"--postprocessor-args", "Merger+ffmpeg_o:-c:v copy -c:a aac",
+			"--merge-output-format", req.OutputFormat,
+			"--postprocessor-args", "Merger+ffmpeg_o:-c:v copy -c:a "+audioCodec,
 		)
 	}
 

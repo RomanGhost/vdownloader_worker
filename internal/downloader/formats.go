@@ -85,6 +85,12 @@ func ByKey(key string) (Format, bool) {
 	return Format{}, false
 }
 
+// outputFormats is the list of containers supported for remuxing via ffmpeg.
+var outputFormats = []string{"mp4", "webm", "mkv", "mov", "avi"}
+
+// OutputFormats returns the containers available for --merge-output-format.
+func OutputFormats() []string { return outputFormats }
+
 var customFormatRe = regexp.MustCompile(`^[\d+\s]+$`)
 
 // ParseCustom validates and wraps a raw yt-dlp format string entered by the user.

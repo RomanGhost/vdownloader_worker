@@ -43,6 +43,9 @@ type DownloadRequest struct {
 	QualityLabel string `json:"quality_label"`
 	AudioOnly    bool   `json:"audio_only"`
 	MergeAudio   bool   `json:"merge_audio"`
+	// OutputFormat forces a container remux (e.g. "mp4", "webm", "mkv").
+	// Empty means keep the original container.
+	OutputFormat string `json:"output_format,omitempty"`
 }
 
 // DownloadResponse is the synchronous RPC reply: the job identifier.

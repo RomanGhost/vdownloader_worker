@@ -1,15 +1,18 @@
 // Package fileserver exposes downloaded files over HTTP.
 // GET /files/{file_id} looks up the file path in the database and streams it.
+// GET /formats        returns the list of containers available for remuxing.
 package fileserver
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
 
+	"downloader/internal/downloader"
 	"downloader/internal/storage"
 )
 
@@ -37,6 +40,7 @@ func New(addr string, db *storage.DB, log *slog.Logger) *Server {
 	s := &Server{db: db, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/files/", s.handleFile)
+	mux.HandleFunc("/formats", s.handleFormats)
 	s.http = &http.Server{Addr: addr, Handler: mux}
 	return s
 }
@@ -54,6 +58,11 @@ func (s *Server) Start() {
 // Shutdown gracefully stops the HTTP server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.http.Shutdown(ctx)
+}
+
+func (s *Server) handleFormats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(downloader.OutputFormats())
 }
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +84,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ext := filepath.Ext(dl.OutputPath)
-	name := sanitizeFilename(dl.Title) + ext
+	title := strings.TrimSuffix(dl.Title, filepath.Ext(dl.Title))
+	name := sanitizeFilename(title) + " [" + sanitizeFilename(dl.QualityLabel) + "]" + ext
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeFile(w, r, dl.OutputPath)
 }
