@@ -23,13 +23,13 @@ import (
 //                       → yt-dlp download in goroutine                    (async)
 //                       → publish CompletedEvent{file_id, status} when done (async)
 type Worker struct {
-	conn    *amqp.Connection
-	ch      *amqp.Channel  // consumer channel (main goroutine only)
-	pubCh   *amqp.Channel  // publish channel (shared across goroutines, guarded by pubMu)
-	pubMu   sync.Mutex
-	db      *storage.DB
-	outDir  string
-	log     *slog.Logger
+	conn   *amqp.Connection
+	ch     *amqp.Channel  // consumer channel (main goroutine only)
+	pubCh  *amqp.Channel  // publish channel (shared across goroutines, guarded by pubMu)
+	pubMu  sync.Mutex
+	db     *storage.DB
+	outDir string
+	log    *slog.Logger
 }
 
 // NewWorker dials RabbitMQ, opens a channel, and declares all required queues.

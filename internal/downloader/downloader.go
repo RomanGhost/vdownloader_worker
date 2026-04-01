@@ -2,10 +2,13 @@
 package downloader
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -62,8 +65,13 @@ type ytDLPMeta struct {
 // FetchVideoInfo calls yt-dlp -J and returns the video title and available formats.
 // Storyboard (mhtml) entries are excluded.
 func FetchVideoInfo(ctx context.Context, url string) (VideoInfo, error) {
-	out, err := exec.CommandContext(ctx, "yt-dlp", "-J", "--no-warnings", url).Output()
+	cmd := exec.CommandContext(ctx, "yt-dlp", "-J", "--no-warnings", url)
+	out, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return VideoInfo{}, fmt.Errorf("fetch video info: %w\n%s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
 		return VideoInfo{}, fmt.Errorf("fetch video info: %w", err)
 	}
 
@@ -165,9 +173,13 @@ func Download(ctx context.Context, req Request) (Result, error) {
 
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Run(); err != nil {
+		if stderrBuf.Len() > 0 {
+			return Result{}, fmt.Errorf("yt-dlp: %w\n%s", err, strings.TrimSpace(stderrBuf.String()))
+		}
 		return Result{}, fmt.Errorf("yt-dlp: %w", err)
 	}
 
