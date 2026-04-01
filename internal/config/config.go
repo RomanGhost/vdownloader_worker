@@ -28,16 +28,6 @@ type Config struct {
 	// FileServerAddr is the address the HTTP file server listens on.
 	// Env: FILE_SERVER_ADDR  Default: :8080
 	FileServerAddr string
-
-	// CookiesFromBrowser passes --cookies-from-browser to yt-dlp.
-	// Set to a browser name such as "chrome", "firefox", or "safari".
-	// Env: COOKIES_FROM_BROWSER  Default: ""
-	CookiesFromBrowser string
-
-	// CookiesFile passes --cookies to yt-dlp.
-	// Set to the path of a Netscape-format cookies.txt file.
-	// Env: COOKIES_FILE  Default: ""
-	CookiesFile string
 }
 
 // Load reads .env (if present), then environment variables, then falls back to defaults.
@@ -47,12 +37,10 @@ func Load() Config {
 	_ = godotenv.Load()
 
 	return Config{
-		DBPath:             getenv("DB_PATH", "downloads.db"),
-		AMQPUrl:            getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
-		OutDir:             getenv("OUT_DIR", "./downloads"),
-		FileServerAddr:     getenv("FILE_SERVER_ADDR", ":8080"),
-		CookiesFromBrowser: getenv("COOKIES_FROM_BROWSER", ""),
-		CookiesFile:        getenv("COOKIES_FILE", ""),
+		DBPath:         getenv("DB_PATH", "downloads.db"),
+		AMQPUrl:        getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+		OutDir:         getenv("OUT_DIR", "./downloads"),
+		FileServerAddr: getenv("FILE_SERVER_ADDR", ":8080"),
 	}
 }
 

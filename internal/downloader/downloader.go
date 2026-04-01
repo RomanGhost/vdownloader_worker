@@ -64,14 +64,8 @@ type ytDLPMeta struct {
 
 // FetchVideoInfo calls yt-dlp -J and returns the video title and available formats.
 // Storyboard (mhtml) entries are excluded.
-// cookiesFromBrowser (e.g. "chrome", "firefox") and cookiesFile (path to a
-// Netscape-format cookies.txt) are optional; pass empty strings to skip them.
-func FetchVideoInfo(ctx context.Context, url, cookiesFromBrowser, cookiesFile string) (VideoInfo, error) {
-	args := []string{"-J", "--no-warnings"}
-	args = appendCookieArgs(args, cookiesFromBrowser, cookiesFile)
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+func FetchVideoInfo(ctx context.Context, url string) (VideoInfo, error) {
+	cmd := exec.CommandContext(ctx, "yt-dlp", "-J", "--no-warnings", url)
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -110,17 +104,6 @@ func FetchVideoInfo(ctx context.Context, url, cookiesFromBrowser, cookiesFile st
 	return VideoInfo{Title: meta.Title, Formats: formats}, nil
 }
 
-// appendCookieArgs appends --cookies-from-browser and/or --cookies flags when set.
-func appendCookieArgs(args []string, fromBrowser, file string) []string {
-	if fromBrowser != "" {
-		args = append(args, "--cookies-from-browser", fromBrowser)
-	}
-	if file != "" {
-		args = append(args, "--cookies", file)
-	}
-	return args
-}
-
 // Request holds all parameters needed for a single download.
 type Request struct {
 	URL          string
@@ -128,10 +111,6 @@ type Request struct {
 	Format       Format
 	OutDir       string
 	OutputFormat string // container remux: "mp4", "webm", "mkv", etc. Empty = keep original.
-	// CookiesFromBrowser passes --cookies-from-browser to yt-dlp (e.g. "chrome", "firefox").
-	CookiesFromBrowser string
-	// CookiesFile passes --cookies to yt-dlp (path to a Netscape-format cookies.txt).
-	CookiesFile string
 }
 
 // Result contains information about a completed download.
@@ -172,7 +151,6 @@ func Download(ctx context.Context, req Request) (Result, error) {
 		// without mixing it into the progress output.
 		"--print-to-file", "after_move:filepath", tmpPath,
 	}
-	args = appendCookieArgs(args, req.CookiesFromBrowser, req.CookiesFile)
 
 	if req.Format.AudioOnly {
 		args = append(args,
