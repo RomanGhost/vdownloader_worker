@@ -23,17 +23,19 @@ import (
 //                       → yt-dlp download in goroutine                    (async)
 //                       → publish CompletedEvent{file_id, status} when done (async)
 type Worker struct {
-	conn    *amqp.Connection
-	ch      *amqp.Channel  // consumer channel (main goroutine only)
-	pubCh   *amqp.Channel  // publish channel (shared across goroutines, guarded by pubMu)
-	pubMu   sync.Mutex
-	db      *storage.DB
-	outDir  string
-	log     *slog.Logger
+	conn               *amqp.Connection
+	ch                 *amqp.Channel // consumer channel (main goroutine only)
+	pubCh              *amqp.Channel // publish channel (shared across goroutines, guarded by pubMu)
+	pubMu              sync.Mutex
+	db                 *storage.DB
+	outDir             string
+	cookiesFromBrowser string
+	cookiesFile        string
+	log                *slog.Logger
 }
 
 // NewWorker dials RabbitMQ, opens a channel, and declares all required queues.
-func NewWorker(amqpURL string, db *storage.DB, outDir string, log *slog.Logger) (*Worker, error) {
+func NewWorker(amqpURL string, db *storage.DB, outDir, cookiesFromBrowser, cookiesFile string, log *slog.Logger) (*Worker, error) {
 	conn, err := amqp.Dial(amqpURL)
 	if err != nil {
 		return nil, fmt.Errorf("connect rabbitmq: %w", err)
@@ -61,7 +63,7 @@ func NewWorker(amqpURL string, db *storage.DB, outDir string, log *slog.Logger) 
 		}
 	}
 
-	return &Worker{conn: conn, ch: ch, pubCh: pubCh, db: db, outDir: outDir, log: log}, nil
+	return &Worker{conn: conn, ch: ch, pubCh: pubCh, db: db, outDir: outDir, cookiesFromBrowser: cookiesFromBrowser, cookiesFile: cookiesFile, log: log}, nil
 }
 
 // Run blocks until ctx is cancelled, processing one message at a time per queue.
@@ -118,7 +120,7 @@ func (w *Worker) handleGetFormats(ctx context.Context, msg amqp.Delivery) {
 	}
 
 	resp := GetFormatsResponse{}
-	info, err := downloader.FetchVideoInfo(ctx, req.URL)
+	info, err := downloader.FetchVideoInfo(ctx, req.URL, w.cookiesFromBrowser, w.cookiesFile)
 	if err != nil {
 		resp.Error = err.Error()
 	} else {
@@ -196,8 +198,10 @@ func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 				AudioOnly:  req.AudioOnly,
 				MergeAudio: req.MergeAudio,
 			},
-			OutDir:       w.outDir,
-			OutputFormat: req.OutputFormat,
+			OutDir:             w.outDir,
+			OutputFormat:       req.OutputFormat,
+			CookiesFromBrowser: w.cookiesFromBrowser,
+			CookiesFile:        w.cookiesFile,
 		})
 
 		event := CompletedEvent{JobID: jobID, FileID: fileID}

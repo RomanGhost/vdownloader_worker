@@ -2,10 +2,13 @@
 package downloader
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -61,9 +64,20 @@ type ytDLPMeta struct {
 
 // FetchVideoInfo calls yt-dlp -J and returns the video title and available formats.
 // Storyboard (mhtml) entries are excluded.
-func FetchVideoInfo(ctx context.Context, url string) (VideoInfo, error) {
-	out, err := exec.CommandContext(ctx, "yt-dlp", "-J", "--no-warnings", url).Output()
+// cookiesFromBrowser (e.g. "chrome", "firefox") and cookiesFile (path to a
+// Netscape-format cookies.txt) are optional; pass empty strings to skip them.
+func FetchVideoInfo(ctx context.Context, url, cookiesFromBrowser, cookiesFile string) (VideoInfo, error) {
+	args := []string{"-J", "--no-warnings"}
+	args = appendCookieArgs(args, cookiesFromBrowser, cookiesFile)
+	args = append(args, url)
+
+	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	out, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return VideoInfo{}, fmt.Errorf("fetch video info: %w\n%s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
 		return VideoInfo{}, fmt.Errorf("fetch video info: %w", err)
 	}
 
@@ -96,6 +110,17 @@ func FetchVideoInfo(ctx context.Context, url string) (VideoInfo, error) {
 	return VideoInfo{Title: meta.Title, Formats: formats}, nil
 }
 
+// appendCookieArgs appends --cookies-from-browser and/or --cookies flags when set.
+func appendCookieArgs(args []string, fromBrowser, file string) []string {
+	if fromBrowser != "" {
+		args = append(args, "--cookies-from-browser", fromBrowser)
+	}
+	if file != "" {
+		args = append(args, "--cookies", file)
+	}
+	return args
+}
+
 // Request holds all parameters needed for a single download.
 type Request struct {
 	URL          string
@@ -103,6 +128,10 @@ type Request struct {
 	Format       Format
 	OutDir       string
 	OutputFormat string // container remux: "mp4", "webm", "mkv", etc. Empty = keep original.
+	// CookiesFromBrowser passes --cookies-from-browser to yt-dlp (e.g. "chrome", "firefox").
+	CookiesFromBrowser string
+	// CookiesFile passes --cookies to yt-dlp (path to a Netscape-format cookies.txt).
+	CookiesFile string
 }
 
 // Result contains information about a completed download.
@@ -143,6 +172,7 @@ func Download(ctx context.Context, req Request) (Result, error) {
 		// without mixing it into the progress output.
 		"--print-to-file", "after_move:filepath", tmpPath,
 	}
+	args = appendCookieArgs(args, req.CookiesFromBrowser, req.CookiesFile)
 
 	if req.Format.AudioOnly {
 		args = append(args,
@@ -165,9 +195,13 @@ func Download(ctx context.Context, req Request) (Result, error) {
 
 	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Run(); err != nil {
+		if stderrBuf.Len() > 0 {
+			return Result{}, fmt.Errorf("yt-dlp: %w\n%s", err, strings.TrimSpace(stderrBuf.String()))
+		}
 		return Result{}, fmt.Errorf("yt-dlp: %w", err)
 	}
 

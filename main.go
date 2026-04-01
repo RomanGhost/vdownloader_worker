@@ -48,18 +48,18 @@ func main() {
 	}
 
 	if *workerMode {
-		runWorker(ctx, *amqpURL, *outDir, *fsAddr, db, logger)
+		runWorker(ctx, *amqpURL, *outDir, *fsAddr, cfg, db, logger)
 		return
 	}
 
 	term := ui.New(os.Stdin, os.Stdout)
-	if err := runCLI(ctx, term, db); err != nil {
+	if err := runCLI(ctx, term, db, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, db *storage.DB, log *slog.Logger) {
+func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, cfg config.Config, db *storage.DB, log *slog.Logger) {
 	if err := downloader.CheckDependency(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -68,7 +68,7 @@ func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, db *storage.
 	fs := fileserver.New(fsAddr, db, log)
 	fs.Start()
 
-	w, err := queue.NewWorker(amqpURL, db, outDir, log)
+	w, err := queue.NewWorker(amqpURL, db, outDir, cfg.CookiesFromBrowser, cfg.CookiesFile, log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -90,7 +90,7 @@ func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, db *storage.
 	}
 }
 
-func runCLI(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
+func runCLI(ctx context.Context, term *ui.Terminal, db *storage.DB, cfg config.Config) error {
 	if err := downloader.CheckDependency(); err != nil {
 		return err
 	}
@@ -104,7 +104,7 @@ func runCLI(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 	}
 
 	fmt.Println("Fetching video info...")
-	info, err := downloader.FetchVideoInfo(ctx, url)
+	info, err := downloader.FetchVideoInfo(ctx, url, cfg.CookiesFromBrowser, cfg.CookiesFile)
 	if err != nil {
 		return err
 	}
@@ -129,10 +129,12 @@ func runCLI(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 
 	fmt.Println("\nDownloading...")
 	result, err := downloader.Download(ctx, downloader.Request{
-		URL:    url,
-		Title:  info.Title,
-		Format: format,
-		OutDir: outDir,
+		URL:                url,
+		Title:              info.Title,
+		Format:             format,
+		OutDir:             outDir,
+		CookiesFromBrowser: cfg.CookiesFromBrowser,
+		CookiesFile:        cfg.CookiesFile,
 	})
 	if err != nil {
 		return err
