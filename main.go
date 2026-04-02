@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"downloader/internal/config"
 	"downloader/internal/downloader"
@@ -65,18 +66,28 @@ func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, db *storage.
 		os.Exit(1)
 	}
 
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	fs := fileserver.New(fsAddr, db, log)
 	fs.Start()
 
-	w, err := queue.NewWorker(amqpURL, db, outDir, log)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	var w *queue.Worker
+	for attempt, delay := 1, time.Second; ; attempt, delay = attempt+1, min(delay*2, 30*time.Second) {
+		var err error
+		w, err = queue.NewWorker(amqpURL, db, outDir, log)
+		if err == nil {
+			break
+		}
+		log.Warn("rabbitmq not ready, retrying", "attempt", attempt, "delay", delay, "err", err)
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "error: context cancelled while waiting for rabbitmq\n")
+			os.Exit(1)
+		case <-time.After(delay):
+		}
 	}
 	defer w.Close()
-
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	log.Info("starting worker", "amqp", amqpURL, "out_dir", outDir)
 	if err := w.Run(ctx); err != nil {

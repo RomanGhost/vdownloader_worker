@@ -117,9 +117,11 @@ func (w *Worker) handleGetFormats(ctx context.Context, msg amqp.Delivery) {
 		return
 	}
 
+	w.log.Info("get_formats", "url", req.URL)
 	resp := GetFormatsResponse{}
 	info, err := downloader.FetchVideoInfo(ctx, req.URL)
 	if err != nil {
+		w.log.Warn("get_formats failed", "url", req.URL, "err", err)
 		resp.Error = err.Error()
 	} else {
 		resp.Title = info.Title
@@ -158,6 +160,8 @@ func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 		msg.Nack(false, false)
 		return
 	}
+
+	w.log.Info("download request", "url", req.URL, "format", req.FormatArg, "quality", req.QualityLabel)
 
 	if err := os.MkdirAll(w.outDir, 0o755); err != nil {
 		w.replyErr(msg, fmt.Errorf("create out dir: %w", err))
