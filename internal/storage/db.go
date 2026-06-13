@@ -5,6 +5,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -97,7 +98,7 @@ func (s *DB) GetByFileID(ctx context.Context, fileID string) (*Download, error) 
 		&dl.ID, &dl.FileID, &dl.URL, &dl.Title, &dl.FileName,
 		&dl.FormatArg, &dl.QualityLabel, &dl.OutputPath, &createdAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

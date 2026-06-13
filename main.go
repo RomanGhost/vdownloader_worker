@@ -22,7 +22,7 @@ func main() {
 	cfg := config.Load()
 
 	workerMode := flag.Bool("worker", false, "run as RabbitMQ worker instead of interactive terminal")
-	amqpURL := flag.String("amqp", cfg.AMQPUrl, "RabbitMQ connection URL (env: AMQP_URL)")
+	amqpURL := flag.String("amqp", cfg.AMQPURL, "RabbitMQ connection URL (env: AMQP_URL)")
 	outDir := flag.String("out", cfg.OutDir, "output directory for downloads (env: OUT_DIR)")
 	dbPath := flag.String("db", cfg.DBPath, "SQLite database file path (env: DB_PATH)")
 	fsAddr := flag.String("fs-addr", cfg.FileServerAddr, "file server listen address (env: FILE_SERVER_ADDR)")

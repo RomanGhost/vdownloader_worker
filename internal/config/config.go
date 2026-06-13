@@ -17,9 +17,9 @@ type Config struct {
 	// Env: DB_PATH  Default: downloads.db
 	DBPath string
 
-	// AMQPUrl is the RabbitMQ connection string.
+	// AMQPURL is the RabbitMQ connection string.
 	// Env: AMQP_URL  Default: amqp://guest:guest@localhost:5672/
-	AMQPUrl string
+	AMQPURL string
 
 	// OutDir is the directory where downloaded files are stored.
 	// Env: OUT_DIR  Default: ./downloads
@@ -38,7 +38,7 @@ func Load() Config {
 
 	return Config{
 		DBPath:         getenv("DB_PATH", "downloads.db"),
-		AMQPUrl:        getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+		AMQPURL:        getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
 		OutDir:         getenv("OUT_DIR", "./downloads"),
 		FileServerAddr: getenv("FILE_SERVER_ADDR", ":8080"),
 	}

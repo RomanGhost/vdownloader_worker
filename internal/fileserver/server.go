@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -86,6 +87,6 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	ext := filepath.Ext(dl.OutputPath)
 	title := strings.TrimSuffix(dl.Title, filepath.Ext(dl.Title))
 	name := sanitizeFilename(title) + " [" + sanitizeFilename(dl.QualityLabel) + "]" + ext
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
 	http.ServeFile(w, r, dl.OutputPath)
 }
