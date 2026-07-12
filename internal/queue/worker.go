@@ -13,6 +13,7 @@ import (
 
 	"downloader/internal/downloader"
 	"downloader/internal/storage"
+	"downloader/internal/webhook"
 )
 
 // Worker consumes RabbitMQ queues and runs yt-dlp downloads.
@@ -22,18 +23,20 @@ import (
 //   - video.download    → save DB record → RPC reply with job_id         (sync)
 //                       → yt-dlp download in goroutine                    (async)
 //                       → publish CompletedEvent{file_id, status} when done (async)
+//                       → POST webhook when done (async, if configured)
 type Worker struct {
 	conn   *amqp.Connection
-	ch     *amqp.Channel  // consumer channel (main goroutine only)
-	pubCh  *amqp.Channel  // publish channel (shared across goroutines, guarded by pubMu)
+	ch     *amqp.Channel // consumer channel (main goroutine only)
+	pubCh  *amqp.Channel // publish channel (shared across goroutines, guarded by pubMu)
 	pubMu  sync.Mutex
 	db     *storage.DB
 	outDir string
+	hook   *webhook.Caller
 	log    *slog.Logger
 }
 
 // NewWorker dials RabbitMQ, opens a channel, and declares all required queues.
-func NewWorker(amqpURL string, db *storage.DB, outDir string, log *slog.Logger) (*Worker, error) {
+func NewWorker(amqpURL string, db *storage.DB, outDir string, hook *webhook.Caller, log *slog.Logger) (*Worker, error) {
 	conn, err := amqp.Dial(amqpURL)
 	if err != nil {
 		return nil, fmt.Errorf("connect rabbitmq: %w", err)
@@ -61,7 +64,7 @@ func NewWorker(amqpURL string, db *storage.DB, outDir string, log *slog.Logger) 
 		}
 	}
 
-	return &Worker{conn: conn, ch: ch, pubCh: pubCh, db: db, outDir: outDir, log: log}, nil
+	return &Worker{conn: conn, ch: ch, pubCh: pubCh, db: db, outDir: outDir, hook: hook, log: log}, nil
 }
 
 // Run blocks until ctx is cancelled, processing one message at a time per queue.
@@ -108,6 +111,12 @@ func (w *Worker) Close() {
 	w.conn.Close()
 }
 
+// PublishCompleted publishes a CompletedEvent to the video.completed queue.
+// It is safe to call from multiple goroutines.
+func (w *Worker) PublishCompleted(event CompletedEvent) error {
+	return w.publish(QueueCompleted, event)
+}
+
 // handleGetFormats: sync RPC — fetch formats and reply.
 func (w *Worker) handleGetFormats(ctx context.Context, msg amqp.Delivery) {
 	var req GetFormatsRequest
@@ -152,7 +161,7 @@ func (w *Worker) handleGetFormats(ctx context.Context, msg amqp.Delivery) {
 }
 
 // handleDownload: sync part — save record with UUID file_id, reply with job_id.
-// async part — run yt-dlp, update DB, publish CompletedEvent.
+// async part — run yt-dlp, update DB, publish CompletedEvent, fire webhook.
 func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 	var req DownloadRequest
 	if err := json.Unmarshal(msg.Body, &req); err != nil {
@@ -189,38 +198,55 @@ func (w *Worker) handleDownload(ctx context.Context, msg amqp.Delivery) {
 	}
 	msg.Ack(false)
 
-	// ── Asynchronous: download → update DB → publish completion ──────────────
-	go func(jobID int64, fileID string) {
-		result, err := downloader.Download(context.Background(), downloader.Request{
-			URL:   req.URL,
-			Title: req.Title,
-			Format: downloader.Format{
-				Arg:        req.FormatArg,
-				Label:      req.QualityLabel,
-				AudioOnly:  req.AudioOnly,
-				MergeAudio: req.MergeAudio,
-			},
-			OutDir:       w.outDir,
-			OutputFormat: req.OutputFormat,
-		})
+	// ── Asynchronous: download → update DB → publish completion → webhook ────
+	go w.runDownload(context.Background(), record.ID, record.FileID, req.URL, req.Title, downloader.Request{
+		URL:   req.URL,
+		Title: req.Title,
+		Format: downloader.Format{
+			Arg:        req.FormatArg,
+			Label:      req.QualityLabel,
+			AudioOnly:  req.AudioOnly,
+			MergeAudio: req.MergeAudio,
+		},
+		OutDir:       w.outDir,
+		OutputFormat: req.OutputFormat,
+	})
+}
 
-		event := CompletedEvent{JobID: jobID, FileID: fileID}
-		if err != nil {
-			event.Status = StatusFailed
-			event.Error = err.Error()
-			w.log.Error("download failed", "job_id", jobID, "err", err)
-		} else {
-			event.Status = StatusReady
-			if dbErr := w.db.UpdateOutputPath(context.Background(), jobID, result.FilePath); dbErr != nil {
-				w.log.Error("update output path", "job_id", jobID, "err", dbErr)
-			}
-			w.log.Info("download done", "job_id", jobID, "file_id", fileID)
-		}
+// runDownload executes a yt-dlp download, updates the database, publishes the
+// completion event to RabbitMQ, and fires the webhook. It is designed to run
+// in a goroutine.
+func (w *Worker) runDownload(ctx context.Context, jobID int64, fileID, url, title string, req downloader.Request) {
+	result, err := downloader.Download(ctx, req)
 
-		if err := w.publish(QueueCompleted, event); err != nil {
-			w.log.Error("publish completed", "job_id", jobID, "err", err)
+	event := CompletedEvent{JobID: jobID, FileID: fileID}
+	hookPayload := webhook.Payload{JobID: jobID, FileID: fileID, Title: title, URL: url}
+
+	if err != nil {
+		event.Status = StatusFailed
+		event.Error = err.Error()
+		hookPayload.Status = StatusFailed
+		hookPayload.Error = err.Error()
+		w.log.Error("download failed", "job_id", jobID, "err", err)
+		if dbErr := w.db.UpdateError(ctx, jobID, err.Error()); dbErr != nil {
+			w.log.Error("update error status", "job_id", jobID, "err", dbErr)
 		}
-	}(record.ID, record.FileID)
+	} else {
+		event.Status = StatusReady
+		hookPayload.Status = StatusReady
+		if dbErr := w.db.UpdateOutputPath(ctx, jobID, result.FilePath); dbErr != nil {
+			w.log.Error("update output path", "job_id", jobID, "err", dbErr)
+		}
+		w.log.Info("download done", "job_id", jobID, "file_id", fileID)
+	}
+
+	if err := w.publish(QueueCompleted, event); err != nil {
+		w.log.Error("publish completed", "job_id", jobID, "err", err)
+	}
+
+	if err := w.hook.Send(ctx, hookPayload); err != nil {
+		w.log.Warn("webhook send failed", "job_id", jobID, "err", err)
+	}
 }
 
 // reply sends a JSON response to msg.ReplyTo preserving the correlation ID.

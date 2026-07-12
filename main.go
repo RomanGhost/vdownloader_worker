@@ -10,12 +10,14 @@ import (
 	"syscall"
 	"time"
 
+	"downloader/internal/api"
 	"downloader/internal/config"
 	"downloader/internal/downloader"
 	"downloader/internal/fileserver"
 	"downloader/internal/queue"
 	"downloader/internal/storage"
 	"downloader/internal/ui"
+	"downloader/internal/webhook"
 )
 
 func main() {
@@ -25,7 +27,8 @@ func main() {
 	amqpURL := flag.String("amqp", cfg.AMQPURL, "RabbitMQ connection URL (env: AMQP_URL)")
 	outDir := flag.String("out", cfg.OutDir, "output directory for downloads (env: OUT_DIR)")
 	dbPath := flag.String("db", cfg.DBPath, "SQLite database file path (env: DB_PATH)")
-	fsAddr := flag.String("fs-addr", cfg.FileServerAddr, "file server listen address (env: FILE_SERVER_ADDR)")
+	fsAddr := flag.String("fs-addr", cfg.FileServerAddr, "HTTP server listen address (env: FILE_SERVER_ADDR)")
+	webhookURL := flag.String("webhook", cfg.WebhookURL, "webhook URL for download completion events (env: WEBHOOK_URL)")
 	flag.Parse()
 
 	level := slog.LevelWarn
@@ -49,7 +52,7 @@ func main() {
 	}
 
 	if *workerMode {
-		runWorker(ctx, *amqpURL, *outDir, *fsAddr, db, logger)
+		runWorker(ctx, *amqpURL, *outDir, *fsAddr, *webhookURL, db, logger)
 		return
 	}
 
@@ -60,7 +63,7 @@ func main() {
 	}
 }
 
-func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, db *storage.DB, log *slog.Logger) {
+func runWorker(ctx context.Context, amqpURL, outDir, fsAddr, webhookURL string, db *storage.DB, log *slog.Logger) {
 	if err := downloader.CheckDependency(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -69,13 +72,15 @@ func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, db *storage.
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fs := fileserver.New(fsAddr, db, log)
-	fs.Start()
+	hook := webhook.New(webhookURL, log)
 
+	fs := fileserver.New(fsAddr, db, log)
+
+	// Connect to RabbitMQ with exponential backoff.
 	var w *queue.Worker
 	for attempt, delay := 1, time.Second; ; attempt, delay = attempt+1, min(delay*2, 30*time.Second) {
 		var err error
-		w, err = queue.NewWorker(amqpURL, db, outDir, log)
+		w, err = queue.NewWorker(amqpURL, db, outDir, hook, log)
 		if err == nil {
 			break
 		}
@@ -89,7 +94,13 @@ func runWorker(ctx context.Context, amqpURL, outDir, fsAddr string, db *storage.
 	}
 	defer w.Close()
 
-	log.Info("starting worker", "amqp", amqpURL, "out_dir", outDir)
+	// Mount the REST API on the same mux as the file server.
+	apiSrv := api.New(db, outDir, hook, w.PublishCompleted, log)
+	apiSrv.RegisterRoutes(fs.Mux())
+
+	fs.Start()
+
+	log.Info("starting worker", "amqp", amqpURL, "out_dir", outDir, "webhook", webhookURL)
 	if err := w.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "worker error: %v\n", err)
 		os.Exit(1)

@@ -25,9 +25,14 @@ type Config struct {
 	// Env: OUT_DIR  Default: ./downloads
 	OutDir string
 
-	// FileServerAddr is the address the HTTP file server listens on.
+	// FileServerAddr is the address the HTTP server listens on (file server + API).
 	// Env: FILE_SERVER_ADDR  Default: :8080
 	FileServerAddr string
+
+	// WebhookURL is an optional HTTP endpoint that receives a POST on every
+	// download completion. Leave empty to disable.
+	// Env: WEBHOOK_URL  Default: (disabled)
+	WebhookURL string
 }
 
 // Load reads .env (if present), then environment variables, then falls back to defaults.
@@ -41,6 +46,7 @@ func Load() Config {
 		AMQPURL:        getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
 		OutDir:         getenv("OUT_DIR", "./downloads"),
 		FileServerAddr: getenv("FILE_SERVER_ADDR", ":8080"),
+		WebhookURL:     getenv("WEBHOOK_URL", ""),
 	}
 }
 

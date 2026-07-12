@@ -33,18 +33,22 @@ func sanitizeFilename(s string) string {
 type Server struct {
 	db   *storage.DB
 	log  *slog.Logger
+	mux  *http.ServeMux
 	http *http.Server
 }
 
 // New creates a Server listening on addr (e.g. ":8080").
 func New(addr string, db *storage.DB, log *slog.Logger) *Server {
-	s := &Server{db: db, log: log}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/files/", s.handleFile)
-	mux.HandleFunc("/formats", s.handleFormats)
-	s.http = &http.Server{Addr: addr, Handler: mux}
+	s := &Server{db: db, log: log, mux: http.NewServeMux()}
+	s.mux.HandleFunc("/files/", s.handleFile)
+	s.mux.HandleFunc("/formats", s.handleFormats)
+	s.http = &http.Server{Addr: addr, Handler: s.mux}
 	return s
 }
+
+// Mux returns the underlying ServeMux so additional routes (e.g. /api/*)
+// can be registered on the same HTTP server.
+func (s *Server) Mux() *http.ServeMux { return s.mux }
 
 // Start begins serving in a background goroutine.
 func (s *Server) Start() {

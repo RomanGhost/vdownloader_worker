@@ -13,5 +13,7 @@ type Download struct {
 	FormatArg    string    // value passed to yt-dlp -f flag
 	QualityLabel string    // human-readable format description
 	OutputPath   string    // absolute path of the file saved to disk
+	Status       string    // "pending" | "ready" | "failed"
+	ErrorMsg     string    // non-empty when Status == "failed"
 	CreatedAt    time.Time // time the record was inserted
 }

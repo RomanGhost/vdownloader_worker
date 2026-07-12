@@ -27,14 +27,24 @@ type FormatInfo struct {
 	FormatNote    string
 }
 
+// HasVideo reports whether the format carries a video stream.
+func (f FormatInfo) HasVideo() bool {
+	return f.VCodec != "" && f.VCodec != "none"
+}
+
+// HasAudio reports whether the format carries an audio stream.
+func (f FormatInfo) HasAudio() bool {
+	return f.AudioChannels > 0
+}
+
 // IsAudioOnly reports whether the format has no video stream.
 func (f FormatInfo) IsAudioOnly() bool {
-	return f.VCodec == "none" || f.VCodec == ""
+	return f.HasAudio() && !f.HasVideo()
 }
 
 // IsVideoOnly reports whether the format has no audio stream.
 func (f FormatInfo) IsVideoOnly() bool {
-	return f.AudioChannels == 0
+	return f.HasVideo() && !f.HasAudio()
 }
 
 // FilesizeStr returns a human-readable filesize.
