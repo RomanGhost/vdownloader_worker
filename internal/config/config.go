@@ -17,9 +17,17 @@ type Config struct {
 	// Env: DB_PATH  Default: downloads.db
 	DBPath string
 
-	// AMQPURL is the RabbitMQ connection string.
-	// Env: AMQP_URL  Default: amqp://guest:guest@localhost:5672/
-	AMQPURL string
+	// KafkaBrokers is a comma-separated list of Kafka broker addresses.
+	// Env: KAFKA_BROKERS  Default: localhost:9092
+	KafkaBrokers string
+
+	// KafkaTopic is the topic job completion notifications are published to.
+	// Env: KAFKA_TOPIC  Default: video.completed
+	KafkaTopic string
+
+	// KafkaJobsTopic is the topic download job requests are consumed from.
+	// Env: KAFKA_JOBS_TOPIC  Default: video.jobs
+	KafkaJobsTopic string
 
 	// OutDir is the directory where downloaded files are stored.
 	// Env: OUT_DIR  Default: ./downloads
@@ -28,11 +36,6 @@ type Config struct {
 	// FileServerAddr is the address the HTTP server listens on (file server + API).
 	// Env: FILE_SERVER_ADDR  Default: :8080
 	FileServerAddr string
-
-	// WebhookURL is an optional HTTP endpoint that receives a POST on every
-	// download completion. Leave empty to disable.
-	// Env: WEBHOOK_URL  Default: (disabled)
-	WebhookURL string
 }
 
 // Load reads .env (if present), then environment variables, then falls back to defaults.
@@ -43,10 +46,11 @@ func Load() Config {
 
 	return Config{
 		DBPath:         getenv("DB_PATH", "downloads.db"),
-		AMQPURL:        getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+		KafkaBrokers:   getenv("KAFKA_BROKERS", "localhost:9092"),
+		KafkaTopic:     getenv("KAFKA_TOPIC", "video.completed"),
+		KafkaJobsTopic: getenv("KAFKA_JOBS_TOPIC", "video.jobs"),
 		OutDir:         getenv("OUT_DIR", "./downloads"),
 		FileServerAddr: getenv("FILE_SERVER_ADDR", ":8080"),
-		WebhookURL:     getenv("WEBHOOK_URL", ""),
 	}
 }
 

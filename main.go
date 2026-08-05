@@ -7,28 +7,28 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
-	"time"
 
 	"downloader/internal/api"
 	"downloader/internal/config"
 	"downloader/internal/downloader"
 	"downloader/internal/fileserver"
-	"downloader/internal/queue"
+	"downloader/internal/kafka"
 	"downloader/internal/storage"
 	"downloader/internal/ui"
-	"downloader/internal/webhook"
 )
 
 func main() {
 	cfg := config.Load()
 
-	workerMode := flag.Bool("worker", false, "run as RabbitMQ worker instead of interactive terminal")
-	amqpURL := flag.String("amqp", cfg.AMQPURL, "RabbitMQ connection URL (env: AMQP_URL)")
+	workerMode := flag.Bool("worker", false, "run as background worker instead of interactive terminal")
+	kafkaBrokers := flag.String("kafka-brokers", cfg.KafkaBrokers, "comma-separated Kafka broker addresses (env: KAFKA_BROKERS)")
+	kafkaTopic := flag.String("kafka-topic", cfg.KafkaTopic, "Kafka topic for job completion notifications (env: KAFKA_TOPIC)")
+	kafkaJobsTopic := flag.String("kafka-jobs-topic", cfg.KafkaJobsTopic, "Kafka topic for incoming job requests (env: KAFKA_JOBS_TOPIC)")
 	outDir := flag.String("out", cfg.OutDir, "output directory for downloads (env: OUT_DIR)")
 	dbPath := flag.String("db", cfg.DBPath, "SQLite database file path (env: DB_PATH)")
 	fsAddr := flag.String("fs-addr", cfg.FileServerAddr, "HTTP server listen address (env: FILE_SERVER_ADDR)")
-	webhookURL := flag.String("webhook", cfg.WebhookURL, "webhook URL for download completion events (env: WEBHOOK_URL)")
 	flag.Parse()
 
 	level := slog.LevelWarn
@@ -52,7 +52,7 @@ func main() {
 	}
 
 	if *workerMode {
-		runWorker(ctx, *amqpURL, *outDir, *fsAddr, *webhookURL, db, logger)
+		runWorker(ctx, *kafkaBrokers, *kafkaTopic, *kafkaJobsTopic, *outDir, *fsAddr, db, logger)
 		return
 	}
 
@@ -63,7 +63,7 @@ func main() {
 	}
 }
 
-func runWorker(ctx context.Context, amqpURL, outDir, fsAddr, webhookURL string, db *storage.DB, log *slog.Logger) {
+func runWorker(ctx context.Context, kafkaBrokers, kafkaTopic, kafkaJobsTopic, outDir, fsAddr string, db *storage.DB, log *slog.Logger) {
 	if err := downloader.CheckDependency(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -72,39 +72,28 @@ func runWorker(ctx context.Context, amqpURL, outDir, fsAddr, webhookURL string, 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	hook := webhook.New(webhookURL, log)
+	brokers := strings.Split(kafkaBrokers, ",")
+
+	producer := kafka.NewProducer(brokers, kafkaTopic)
+	defer producer.Close()
+
+	consumer := kafka.NewConsumer(brokers, kafkaJobsTopic, "vdownloader-worker")
+	defer consumer.Close()
 
 	fs := fileserver.New(fsAddr, db, log)
 
-	// Connect to RabbitMQ with exponential backoff.
-	var w *queue.Worker
-	for attempt, delay := 1, time.Second; ; attempt, delay = attempt+1, min(delay*2, 30*time.Second) {
-		var err error
-		w, err = queue.NewWorker(amqpURL, db, outDir, hook, log)
-		if err == nil {
-			break
-		}
-		log.Warn("rabbitmq not ready, retrying", "attempt", attempt, "delay", delay, "err", err)
-		select {
-		case <-ctx.Done():
-			fmt.Fprintf(os.Stderr, "error: context cancelled while waiting for rabbitmq\n")
-			os.Exit(1)
-		case <-time.After(delay):
-		}
-	}
-	defer w.Close()
-
 	// Mount the REST API on the same mux as the file server.
-	apiSrv := api.New(db, outDir, hook, w.PublishCompleted, log)
+	apiSrv := api.New(db, outDir, producer.Publish, log)
 	apiSrv.RegisterRoutes(fs.Mux())
 
 	fs.Start()
 
-	log.Info("starting worker", "amqp", amqpURL, "out_dir", outDir, "webhook", webhookURL)
-	if err := w.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "worker error: %v\n", err)
-		os.Exit(1)
-	}
+	go consumer.Consume(ctx, log, apiSrv.HandleJobMessage)
+
+	log.Info("starting worker",
+		"kafka_brokers", kafkaBrokers, "kafka_topic", kafkaTopic, "kafka_jobs_topic", kafkaJobsTopic,
+		"out_dir", outDir)
+	<-ctx.Done()
 
 	shutCtx := context.Background()
 	if err := fs.Shutdown(shutCtx); err != nil {

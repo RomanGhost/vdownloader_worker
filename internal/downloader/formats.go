@@ -3,15 +3,17 @@ package downloader
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Format describes a yt-dlp format selection.
 type Format struct {
-	Key        string // menu key shown to the user
-	Label      string // human-readable description
-	Arg        string // value passed to yt-dlp -f flag
-	AudioOnly  bool   // triggers --extract-audio post-processing
-	MergeAudio bool   // append +bestaudio to Arg before passing to yt-dlp
+	Key         string // menu key shown to the user
+	Label       string // human-readable description
+	Arg         string // value passed to yt-dlp -f flag
+	AudioOnly   bool   // triggers --extract-audio post-processing
+	AudioFormat string // target codec when AudioOnly: "mp3" (default), "m4a", "opus", "wav"
+	MergeAudio  bool   // append +bestaudio to Arg before passing to yt-dlp
 }
 
 // FormatInfo holds metadata for a single format returned by yt-dlp -J.
@@ -19,6 +21,7 @@ type FormatInfo struct {
 	FormatID      string
 	Ext           string
 	Resolution    string // e.g. "1920x1080" or "audio only", from yt-dlp's resolution field
+	Height        int    // vertical pixels; 0 for audio-only formats
 	FPS           float64
 	TBR           float64
 	VCodec        string
@@ -116,4 +119,79 @@ func ParseCustom(raw string) (Format, error) {
 		Label: "custom: " + raw,
 		Arg:   raw,
 	}, nil
+}
+
+// ── standardized API quality ladder ──────────────────────────────────────────
+//
+// The Telegram bot and web UI no longer expose yt-dlp's raw per-video format
+// list (it varies wildly by site and isn't meaningful across videos). Instead
+// they offer a fixed video-quality ladder, capped to what the source actually
+// has, plus a fixed set of audio-extraction targets.
+
+// standardHeights is the video-quality ladder offered to API clients,
+// descending. Only tiers at or below the source's actual max height are
+// offered — see AvailableHeights.
+var standardHeights = []int{2160, 1440, 1080, 720, 480, 360}
+
+// standardAudioFormats is the fixed set of audio-extraction targets offered
+// to API clients, default first. Every target is always a transcode via
+// ffmpeg, so the set is identical regardless of the source.
+var standardAudioFormats = []string{"mp3", "m4a", "opus", "wav"}
+
+// AvailableHeights returns the standard quality tiers achievable for the
+// given formats, descending, capped at the source's actual max height. It
+// never fabricates a tier the source can't actually deliver (e.g. no 4K
+// option is returned for a 1080p source).
+func AvailableHeights(formats []FormatInfo) []int {
+	maxHeight := 0
+	for _, f := range formats {
+		if f.Height > maxHeight {
+			maxHeight = f.Height
+		}
+	}
+	var out []int
+	for _, h := range standardHeights {
+		if h <= maxHeight {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// StandardAudioFormats returns the fixed list of audio-extraction targets,
+// default first.
+func StandardAudioFormats() []string {
+	return append([]string(nil), standardAudioFormats...)
+}
+
+// BuildVideoFormat returns the yt-dlp format selection for a standardized
+// quality tier, either muxed with the best available audio track or left
+// video-only.
+func BuildVideoFormat(height int, withAudio bool) Format {
+	if withAudio {
+		return Format{
+			Arg:   fmt.Sprintf("bestvideo[height<=%d]+bestaudio/best[height<=%d]", height, height),
+			Label: fmt.Sprintf("%dp", height),
+		}
+	}
+	return Format{
+		Arg:   fmt.Sprintf("bestvideo[height<=%d]", height),
+		Label: fmt.Sprintf("%dp (no audio)", height),
+	}
+}
+
+// BuildAudioFormat returns the Format for extracting audio in the given
+// target codec. Unknown or empty values fall back to mp3, the default.
+func BuildAudioFormat(audioFormat string) Format {
+	switch audioFormat {
+	case "m4a", "opus", "wav":
+	default:
+		audioFormat = "mp3"
+	}
+	return Format{
+		Arg:         "bestaudio/best",
+		Label:       strings.ToUpper(audioFormat),
+		AudioOnly:   true,
+		AudioFormat: audioFormat,
+	}
 }

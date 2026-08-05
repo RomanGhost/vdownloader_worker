@@ -93,6 +93,7 @@ func FetchVideoInfo(ctx context.Context, url string) (VideoInfo, error) {
 			FormatID:      f.FormatID,
 			Ext:           f.Ext,
 			Resolution:    f.Resolution,
+			Height:        f.Height,
 			FPS:           f.FPS,
 			TBR:           f.TBR,
 			VCodec:        f.VCodec,
@@ -153,9 +154,13 @@ func Download(ctx context.Context, req Request) (Result, error) {
 	}
 
 	if req.Format.AudioOnly {
+		audioFormat := req.Format.AudioFormat
+		if audioFormat == "" {
+			audioFormat = "mp3"
+		}
 		args = append(args,
 			"--extract-audio",
-			"--audio-format", "mp3",
+			"--audio-format", audioFormat,
 			"--audio-quality", "0",
 		)
 	} else if req.OutputFormat != "" {
