@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/google/uuid"
+
 	"downloader/internal/api"
 	"downloader/internal/config"
 	"downloader/internal/downloader"
@@ -140,6 +142,7 @@ func runCLI(ctx context.Context, term *ui.Terminal, db *storage.DB) error {
 
 	fmt.Println("\nDownloading...")
 	result, err := downloader.Download(ctx, downloader.Request{
+		FileID: uuid.NewString(),
 		URL:    url,
 		Title:  info.Title,
 		Format: format,

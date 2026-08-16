@@ -94,6 +94,16 @@ func (s *DB) Save(ctx context.Context, dl *Download) error {
 	return nil
 }
 
+// UpdateTitle updates the title of an existing record, e.g. once it becomes
+// known after the record was saved with a placeholder.
+func (s *DB) UpdateTitle(ctx context.Context, id int64, title string) error {
+	const q = `UPDATE downloads SET title = ? WHERE id = ?`
+	if _, err := s.db.ExecContext(ctx, q, title, id); err != nil {
+		return fmt.Errorf("update title: %w", err)
+	}
+	return nil
+}
+
 // UpdateOutputPath sets output_path and marks the record as ready.
 func (s *DB) UpdateOutputPath(ctx context.Context, id int64, outputPath string) error {
 	const q = `UPDATE downloads SET output_path = ?, status = 'ready' WHERE id = ?`

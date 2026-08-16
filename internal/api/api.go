@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"downloader/internal/downloader"
 	"downloader/internal/storage"
@@ -61,6 +62,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 // every target is a transcode. See downloader.AvailableHeights.
 type formatsResponse struct {
 	Title        string   `json:"title"`
+	Duration     float64  `json:"duration"` // seconds; 0 when the source doesn't report it
 	VideoHeights []int    `json:"video_heights"`
 	AudioFormats []string `json:"audio_formats"`
 }
@@ -86,6 +88,7 @@ func (s *Server) handleFormats(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, formatsResponse{
 		Title:        info.Title,
+		Duration:     info.Duration,
 		VideoHeights: downloader.AvailableHeights(info.Formats),
 		AudioFormats: downloader.StandardAudioFormats(),
 	})
@@ -103,10 +106,11 @@ func (s *Server) handleFormats(w http.ResponseWriter, r *http.Request) {
 //   - "audio": AudioFormat, one of the standard targets from GET /api/formats
 //     ("mp3" is the default when empty).
 type jobRequest struct {
-	FileID string `json:"file_id"`
-	URL    string `json:"url"`
-	Title  string `json:"title,omitempty"`
-	Kind   string `json:"kind"`
+	FileID   string  `json:"file_id"`
+	URL      string  `json:"url"`
+	Title    string  `json:"title,omitempty"`
+	Duration float64 `json:"duration,omitempty"` // seconds, from GET /api/formats; 0 = unknown
+	Kind     string  `json:"kind"`
 
 	Height    int  `json:"height,omitempty"`
 	WithAudio bool `json:"with_audio,omitempty"`
@@ -153,19 +157,17 @@ func (s *Server) HandleJobMessage(ctx context.Context, value []byte) {
 		}
 	}
 
-	if req.Title == "" {
-		info, err := downloader.FetchVideoInfo(ctx, req.URL)
-		if err != nil {
-			s.log.Warn("api: fetch title failed", "url", req.URL, "err", err)
-			req.Title = req.URL // fall back to URL as placeholder title
-		} else {
-			req.Title = info.Title
-		}
-	}
-
 	if err := os.MkdirAll(s.outDir, 0o755); err != nil {
 		s.log.Error("api: create out dir", "err", err)
 		return
+	}
+
+	// Persist the record before the (potentially slow, e.g. for playlist
+	// URLs) title lookup below, so GET /api/jobs/{file_id} finds it right
+	// away instead of racing the caller's poll loop with a 404.
+	titleKnown := req.Title != ""
+	if !titleKnown {
+		req.Title = req.URL // placeholder until the lookup below resolves
 	}
 
 	record := &storage.Download{
@@ -181,15 +183,36 @@ func (s *Server) HandleJobMessage(ctx context.Context, value []byte) {
 	}
 	s.log.Info("api: job accepted", "job_id", record.ID, "file_id", record.FileID)
 
+	if !titleKnown {
+		info, err := downloader.FetchVideoInfo(ctx, req.URL)
+		if err != nil {
+			s.log.Warn("api: fetch title failed", "url", req.URL, "err", err)
+		} else {
+			req.Title = info.Title
+			record.Title = info.Title
+			if err := s.db.UpdateTitle(ctx, record.ID, info.Title); err != nil {
+				s.log.Error("api: update title", "job_id", record.ID, "err", err)
+			}
+		}
+	}
+
 	// Run the download in the background so the Kafka consumer loop can keep
 	// reading subsequent job requests without waiting for this one to finish.
-	go s.runDownload(context.Background(), record, downloader.Request{
-		URL:          req.URL,
-		Title:        req.Title,
-		Format:       format,
-		OutDir:       s.outDir,
-		OutputFormat: outputFormat,
-	})
+	// Bounded by a duration-based timeout so a hung yt-dlp process eventually
+	// gets killed instead of leaving the job "pending" forever.
+	timeout := downloader.EstimateTimeout(time.Duration(req.Duration * float64(time.Second)))
+	dlCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	go func() {
+		defer cancel()
+		s.runDownload(dlCtx, record, downloader.Request{
+			FileID:       req.FileID,
+			URL:          req.URL,
+			Title:        req.Title,
+			Format:       format,
+			OutDir:       s.outDir,
+			OutputFormat: outputFormat,
+		})
+	}()
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {

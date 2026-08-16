@@ -13,10 +13,11 @@ This README covers worker mode; see [Usage → CLI mode](#cli-mode) for the term
 |---|---|
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | `pip install yt-dlp` or `winget install yt-dlp` |
 | [ffmpeg](https://ffmpeg.org) | `winget install ffmpeg` or `brew install ffmpeg` |
+| [ffprobe](https://ffmpeg.org) | ships alongside ffmpeg (same package) |
 | [Go 1.24+](https://go.dev) | only to build from source |
 | A Kafka broker | worker mode only |
 
-Both `yt-dlp` and `ffmpeg` must be on `PATH`. The program checks for them at startup and prints install hints if either is missing.
+`yt-dlp`, `ffmpeg`, and `ffprobe` must all be on `PATH`. The program checks for them at startup and prints install hints if any is missing. `ffprobe` is used to verify the actual video codec of the finished file — see [Codec guarantee](#codec-guarantee).
 
 ## Configuration
 
@@ -59,11 +60,12 @@ Fetches `yt-dlp -J` for the URL and returns the standardized quality ladder avai
 ```json
 {
   "title": "Some Video",
+  "duration": 635.0,
   "video_heights": [1080, 720, 480, 360],
   "audio_formats": ["mp3", "m4a", "opus", "wav"]
 }
 ```
-`400` with `{"error": "..."}` if the URL can't be resolved.
+`400` with `{"error": "..."}` if the URL can't be resolved. `duration` is seconds, `0` if the source doesn't report one (e.g. livestreams); callers should echo it back in the job request (see [Kafka contract](#kafka-contract)) so the worker doesn't have to re-fetch it just to size the download timeout.
 
 ### `GET /api/jobs`
 
@@ -100,7 +102,7 @@ The worker consumes `KAFKA_JOBS_TOPIC` (default `video.jobs`) as a plain consume
 
 ```json
 // kind = "video": Height + WithAudio apply
-{"file_id": "uuid", "url": "https://...", "title": "optional", "kind": "video", "height": 1080, "with_audio": true}
+{"file_id": "uuid", "url": "https://...", "title": "optional", "duration": 635, "kind": "video", "height": 1080, "with_audio": true}
 
 // kind = "audio": AudioFormat applies
 {"file_id": "uuid", "url": "https://...", "kind": "audio", "audio_format": "opus"}
@@ -110,9 +112,12 @@ The worker consumes `KAFKA_JOBS_TOPIC` (default `video.jobs`) as a plain consume
 - `with_audio: false` downloads a video-only stream (no `+bestaudio`, no container remux).
 - `with_audio: true` remuxes into `mp4` (needs a merge container since two separate streams are combined).
 - `audio_format` is one of `mp3` (default, used when empty/unknown) / `m4a` / `opus` / `wav` — always an ffmpeg transcode via `--extract-audio`.
-- `title` is optional; if empty the worker fetches it itself via `yt-dlp -J` before saving the record.
+- `title` is optional; if empty the worker fetches it itself via `yt-dlp -J` before saving the record — the record is saved with a placeholder title (the URL) *before* that lookup, not after, so `GET /api/jobs/{file_id}` finds it immediately instead of racing the caller's poll loop with a `404` while a slow lookup (e.g. a playlist/radio URL) is in flight.
+- `duration` is optional (seconds, from `GET /api/formats`). Used to size the download's timeout via `downloader.EstimateTimeout` — roughly `3x` the video's own real-time duration plus a fixed margin, clamped to `[5min, 3h]`; `0`/omitted falls back to a flat 45-minute timeout. Without this, a hung `yt-dlp` process (bad network, a site that never responds) would never be killed and the job would sit `pending` forever.
 
-Handled by `HandleJobMessage` in [internal/api/api.go](internal/api/api.go), which builds the actual `yt-dlp -f` selector via `downloader.BuildVideoFormat` / `downloader.BuildAudioFormat` ([internal/downloader/formats.go](internal/downloader/formats.go)), then runs the download in the background so the consumer loop isn't blocked.
+Handled by `HandleJobMessage` in [internal/api/api.go](internal/api/api.go), which builds the actual `yt-dlp -f` selector via `downloader.BuildVideoFormat` / `downloader.BuildAudioFormat` ([internal/downloader/formats.go](internal/downloader/formats.go)), then runs the download in the background (bounded by the duration-based timeout above) so the consumer loop isn't blocked.
+
+Each job's output file is named `{file_id}.<ext>` — `file_id` is unique per job, so concurrent downloads (even of the exact same video, requested twice within the same second) can never collide on the same path, unlike a title-hash+timestamp scheme would.
 
 ### Publishes: job completed (`video.completed`)
 
@@ -128,10 +133,16 @@ Both writer (`internal/kafka/producer.go`) and the job-request writers in the ot
 
 `GET /api/formats` never returns yt-dlp's raw per-video format dump (it varies arbitrarily by site). Instead, from [internal/downloader/formats.go](internal/downloader/formats.go):
 
-- `AvailableHeights` — intersects the fixed ladder `{2160, 1440, 1080, 720, 480, 360}` with the source's actual max height; a tier is only offered if the source can really deliver it.
+- `AvailableHeights` — a tier from the fixed ladder `{2160, 1440, 1080, 720, 480, 360}` is only offered when the source both maxes out at or above it *and* has an actual format at or below it. The second condition matters for sparse sources: an Instagram reel whose only formats are ~1280 and ~1920 would (if only capped by max height) still get offered `1080/720/480/360` — every one of which resolves to zero matching formats via yt-dlp's own `bestvideo[height<=H]` selector and fails the download with "Requested format is not available". Sources whose max height sits below the smallest rung (360p) currently get no video tier offered at all.
 - `StandardAudioFormats` — always `{mp3, m4a, opus, wav}`, `mp3` first/default.
 - `BuildVideoFormat(height, withAudio)` — turns a chosen tier into a real yt-dlp selector (`bestvideo[height<=H]+bestaudio/best[height<=H]` or `bestvideo[height<=H]` alone).
 - `BuildAudioFormat(format)` — turns a chosen codec into `--extract-audio --audio-format <format>`.
+
+A playlist/mix/radio URL always resolves to just the single video it points at: both `FetchVideoInfo` and `Download` in [internal/downloader/downloader.go](internal/downloader/downloader.go) pass `--no-playlist`. Without it, a URL like YouTube's `?list=...&start_radio=1` downloads (or probes metadata for) the *entire* list — which can be hundreds of videos, all trying to write to the same `{file_id}.<ext>` output path since there's no playlist-index in the template.
+
+### Codec guarantee
+
+When muxing into a strict container (`mp4`/`mov`/`avi`), the finished file's video codec is verified with `ffprobe` and force-transcoded to H.264/AAC via `ffmpeg` if it isn't already compatible — regardless of what yt-dlp itself decided. This is necessary because yt-dlp's own postprocessors aren't a reliable enough guarantee for this: `--postprocessor-args "Merger:..."` only applies when yt-dlp's Merger postprocessor actually runs (i.e. the resolved selector required combining two separate streams), and sites that instead hand back a single already-muxed format (e.g. TikTok's `bytevc1`, an HEVC-family codec) skip Merger entirely. `--recode-video` runs unconditionally, but only compares the *container* (file extension) — a source already wrapped in `.mp4` is treated as "nothing to do" regardless of the codec inside, which is exactly TikTok's case. The `ffprobe`/`ffmpeg` pass in `downloader.Download` (`hasCompatibleVideoCodec` / `transcodeVideo`) is the only check in the pipeline that actually inspects the codec itself.
 
 ## CLI mode
 
@@ -144,7 +155,7 @@ Fully interactive, no flags:
 1. Enter a video URL.
 2. Choose a format from the menu — built-in presets (best/audio-only/1080p/720p/480p), any raw format from a table of everything yt-dlp reports for that URL, or manual format-ID entry (`137+140` syntax).
 3. Choose an output directory (default `./downloads`).
-4. File is saved as `<hash>_<timestamp>.<ext>`.
+4. File is saved as `<file_id>.<ext>`, where `file_id` is a freshly generated UUID (CLI mode has no Kafka job to inherit one from).
 
 This path is unrelated to the HTTP/Kafka API above — it calls `downloader.Download` directly and uses the separate `Predefined`/`ByKey`/`ParseCustom` helpers in `formats.go`, not the standardized-ladder functions.
 
@@ -165,6 +176,24 @@ Every job (CLI or worker mode) is recorded in the SQLite database at `DB_PATH`:
 | `error_msg` | Populated when `status == failed` |
 | `created_at` | Timestamp |
 
+## Testing
+
+```bash
+go test ./...
+```
+
+No external services needed — SQLite tests use a temp file per test, everything else is pure logic or in-memory HTTP (`httptest`). Covers:
+
+- `internal/downloader/formats_test.go` — `AvailableHeights` (including the sparse-height/Instagram case), `BuildVideoFormat`, `BuildAudioFormat`, `ParseCustom`.
+- `internal/downloader/downloader_test.go` — `EstimateTimeout` bounds.
+- `internal/storage/db_test.go` — `Save`/`GetByFileID`/`UpdateTitle`/`UpdateOutputPath`/`UpdateError`/`List` round trip.
+- `internal/fileserver/server_test.go` — filename sanitization.
+- `internal/api/api_test.go` — `GET /api/jobs` and `GET /api/jobs/{file_id}` (listing, 404/400 cases, `download_url` only appearing once `status == "ready"`), against a real temp SQLite DB.
+
+Not covered by unit tests, since they shell out to `yt-dlp`/`ffmpeg`/`ffprobe` and aren't behind an injectable interface: `HandleJobMessage`, `handleFormats`, `downloader.FetchVideoInfo`/`Download` (codec probing/transcoding included). These are exercised by the end-to-end smoke test instead.
+
+For an end-to-end check against a real running stack (Kafka round trip, actual `yt-dlp`/`ffmpeg` invocation, real codec verification), see [the repo root's smoke test](../README.md#testing).
+
 ## Project structure
 
 ```
@@ -172,17 +201,22 @@ Every job (CLI or worker mode) is recorded in the SQLite database at `DB_PATH`:
 ├── main.go                        # Entry point: CLI mode or -worker mode
 └── internal/
     ├── api/
-    │   └── api.go                 # HTTP routes + Kafka job-message handler
+    │   ├── api.go                 # HTTP routes + Kafka job-message handler
+    │   └── api_test.go
     ├── downloader/
     │   ├── downloader.go          # yt-dlp wrapper: metadata fetch + download
-    │   └── formats.go             # Standardized quality ladder + CLI presets
+    │   ├── downloader_test.go
+    │   ├── formats.go             # Standardized quality ladder + CLI presets
+    │   └── formats_test.go
     ├── fileserver/
-    │   └── server.go              # GET /files/{file_id}, GET /formats (containers)
+    │   ├── server.go              # GET /files/{file_id}, GET /formats (containers)
+    │   └── server_test.go
     ├── kafka/
     │   ├── consumer.go            # Job-request consumer
     │   └── producer.go            # Completion-notification producer
     ├── storage/
     │   ├── db.go                  # SQLite: Open, Save, List, GetByID/FileID
+    │   ├── db_test.go
     │   └── models.go              # Download record struct
     └── ui/
         └── terminal.go            # CLI-mode interactive prompts and format table

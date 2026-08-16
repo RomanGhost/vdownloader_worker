@@ -141,7 +141,13 @@ var standardAudioFormats = []string{"mp3", "m4a", "opus", "wav"}
 // AvailableHeights returns the standard quality tiers achievable for the
 // given formats, descending, capped at the source's actual max height. It
 // never fabricates a tier the source can't actually deliver (e.g. no 4K
-// option is returned for a 1080p source).
+// option is returned for a 1080p source) — including the case where the
+// source's heights are sparse (e.g. Instagram reels offering only ~1280 and
+// ~1920, nothing in between): a tier is only offered when some format
+// actually has height <= that tier, matching yt-dlp's own
+// bestvideo[height<=H] selector semantics, since a lower tier with no
+// qualifying format would fail downloading with "Requested format is not
+// available" instead of falling back to the nearest one below it.
 func AvailableHeights(formats []FormatInfo) []int {
 	maxHeight := 0
 	for _, f := range formats {
@@ -149,9 +155,17 @@ func AvailableHeights(formats []FormatInfo) []int {
 			maxHeight = f.Height
 		}
 	}
+	hasFormatAtOrBelow := func(h int) bool {
+		for _, f := range formats {
+			if f.Height > 0 && f.Height <= h {
+				return true
+			}
+		}
+		return false
+	}
 	var out []int
 	for _, h := range standardHeights {
-		if h <= maxHeight {
+		if h <= maxHeight && hasFormatAtOrBelow(h) {
 			out = append(out, h)
 		}
 	}
