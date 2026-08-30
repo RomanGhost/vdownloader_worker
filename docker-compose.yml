@@ -6,39 +6,31 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - KAFKA_BROKERS=kafka:9092
-      - KAFKA_TOPIC=video.completed
-      - KAFKA_JOBS_TOPIC=video.jobs
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - OUT_DIR=/downloads
     volumes:
       - downloads:/downloads
     depends_on:
-      kafka:
+      rabbitmq:
         condition: service_healthy
     restart: unless-stopped
 
-  kafka:
-    image: apache/kafka:3.8.0
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
     ports:
-      - "9092:9092"
+      - "5672:5672"
+      - "15672:15672"
     environment:
-      - KAFKA_NODE_ID=1
-      - KAFKA_PROCESS_ROLES=broker,controller
-      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
-      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
-      - CLUSTER_ID=ciWo7IWazngRchmPES6q5A
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
     volumes:
-      - kafka_data:/var/lib/kafka/data
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
 volumes:
   downloads:
-  kafka_data:
+  rabbitmq_data:

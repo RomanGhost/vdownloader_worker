@@ -17,17 +17,11 @@ type Config struct {
 	// Env: DB_PATH  Default: downloads.db
 	DBPath string
 
-	// KafkaBrokers is a comma-separated list of Kafka broker addresses.
-	// Env: KAFKA_BROKERS  Default: localhost:9092
-	KafkaBrokers string
-
-	// KafkaTopic is the topic job completion notifications are published to.
-	// Env: KAFKA_TOPIC  Default: video.completed
-	KafkaTopic string
-
-	// KafkaJobsTopic is the topic download job requests are consumed from.
-	// Env: KAFKA_JOBS_TOPIC  Default: video.jobs
-	KafkaJobsTopic string
+	// RabbitURL is the RabbitMQ connection URL. The worker consumes job
+	// requests from the "video.jobs" queue and publishes completions to
+	// "video.completed" (queue names are constants in internal/mq).
+	// Env: RABBITMQ_URL  Default: amqp://guest:guest@localhost:5672/
+	RabbitURL string
 
 	// OutDir is the directory where downloaded files are stored.
 	// Env: OUT_DIR  Default: ./downloads
@@ -46,9 +40,7 @@ func Load() Config {
 
 	return Config{
 		DBPath:         getenv("DB_PATH", "downloads.db"),
-		KafkaBrokers:   getenv("KAFKA_BROKERS", "localhost:9092"),
-		KafkaTopic:     getenv("KAFKA_TOPIC", "video.completed"),
-		KafkaJobsTopic: getenv("KAFKA_JOBS_TOPIC", "video.jobs"),
+		RabbitURL:      getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
 		OutDir:         getenv("OUT_DIR", "./downloads"),
 		FileServerAddr: getenv("FILE_SERVER_ADDR", ":8080"),
 	}

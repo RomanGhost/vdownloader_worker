@@ -3,7 +3,7 @@
 Runs [yt-dlp](https://github.com/yt-dlp/yt-dlp) to fetch video metadata and download files. Has two independent modes:
 
 - **CLI mode** (default, no flags) — interactive terminal, one URL at a time, for local/manual use.
-- **Worker mode** (`-worker` flag) — the production mode. Consumes download jobs from Kafka, runs them in the background, serves the standardized format list and finished files over HTTP.
+- **Worker mode** (`-worker` flag) — the production mode. Consumes download jobs from RabbitMQ, runs them in the background, serves the standardized format list and finished files over HTTP.
 
 This README covers worker mode; see [Usage → CLI mode](#cli-mode) for the terminal tool.
 
@@ -15,7 +15,7 @@ This README covers worker mode; see [Usage → CLI mode](#cli-mode) for the term
 | [ffmpeg](https://ffmpeg.org) | `winget install ffmpeg` or `brew install ffmpeg` |
 | [ffprobe](https://ffmpeg.org) | ships alongside ffmpeg (same package) |
 | [Go 1.24+](https://go.dev) | only to build from source |
-| A Kafka broker | worker mode only |
+| A RabbitMQ broker | worker mode only |
 
 `yt-dlp`, `ffmpeg`, and `ffprobe` must all be on `PATH`. The program checks for them at startup and prints install hints if any is missing. `ffprobe` is used to verify the actual video codec of the finished file — see [Codec guarantee](#codec-guarantee).
 
@@ -26,11 +26,11 @@ Env vars (all optional, with defaults), read via `.env` → environment → CLI 
 | Env var | Flag | Default | Meaning |
 |---|---|---|---|
 | `DB_PATH` | `-db` | `downloads.db` | SQLite database file |
-| `KAFKA_BROKERS` | `-kafka-brokers` | `localhost:9092` | Comma-separated broker list |
-| `KAFKA_TOPIC` | `-kafka-topic` | `video.completed` | Topic the worker **publishes** completions to |
-| `KAFKA_JOBS_TOPIC` | `-kafka-jobs-topic` | `video.jobs` | Topic the worker **consumes** job requests from |
+| `RABBITMQ_URL` | `-rabbitmq-url` | `amqp://guest:guest@localhost:5672/` | RabbitMQ connection URL |
 | `OUT_DIR` | `-out` | `./downloads` | Where downloaded files are written |
 | `FILE_SERVER_ADDR` | `-fs-addr` | `:8080` | HTTP listen address (formats/jobs/files API) |
+
+The worker **consumes** job requests from the `video.jobs` queue and **publishes** completions to `video.completed`. Both queue names are fixed constants (`internal/mq`), not configuration — only the broker URL is tunable.
 
 ## Running
 
@@ -43,15 +43,15 @@ Env vars (all optional, with defaults), read via `.env` → environment → CLI 
 ```bash
 docker build -t vdownloader-worker .
 docker run -it -p 8080:8080 -v "$(pwd)/downloads:/downloads" \
-  -e KAFKA_BROKERS=host.docker.internal:9092 \
+  -e RABBITMQ_URL=amqp://guest:guest@host.docker.internal:5672/ \
   vdownloader-worker ./downloader -worker
 ```
 
-The image bundles yt-dlp and ffmpeg — no local dependencies needed. See the repo root [docker-compose.yml](../docker-compose.yml) to run it alongside Kafka and the other two services.
+The image bundles yt-dlp and ffmpeg — no local dependencies needed. See the repo root [docker-compose.yml](../docker-compose.yml) to run it alongside RabbitMQ and the other two services.
 
 ## HTTP API
 
-Everything except serving the finished file is a thin read/lookup layer; submitting a download is **not** available over HTTP — that only happens via Kafka (see below).
+Everything except serving the finished file is a thin read/lookup layer; submitting a download is **not** available over HTTP — that only happens via RabbitMQ (see below).
 
 ### `GET /api/formats?url=<url>`
 
@@ -65,7 +65,7 @@ Fetches `yt-dlp -J` for the URL and returns the standardized quality ladder avai
   "audio_formats": ["mp3", "m4a", "opus", "wav"]
 }
 ```
-`400` with `{"error": "..."}` if the URL can't be resolved. `duration` is seconds, `0` if the source doesn't report one (e.g. livestreams); callers should echo it back in the job request (see [Kafka contract](#kafka-contract)) so the worker doesn't have to re-fetch it just to size the download timeout.
+`400` with `{"error": "..."}` if the URL can't be resolved. `duration` is seconds, `0` if the source doesn't report one (e.g. livestreams); callers should echo it back in the job request (see [RabbitMQ contract](#rabbitmq-contract)) so the worker doesn't have to re-fetch it just to size the download timeout.
 
 ### `GET /api/jobs`
 
@@ -92,9 +92,9 @@ Lists all known jobs (any status), most recent first.
 
 Streams the downloaded file with a `Content-Disposition: attachment` filename built from the video title and quality label. `404` if not ready yet or unknown.
 
-## Kafka contract
+## RabbitMQ contract
 
-The worker consumes `KAFKA_JOBS_TOPIC` (default `video.jobs`) as a plain consumer group (`vdownloader-worker`) and publishes to `KAFKA_TOPIC` (default `video.completed`).
+The worker consumes the durable `video.jobs` queue (consumer tag `vdownloader-worker`, prefetch 1, manual ack) and publishes to the durable `video.completed` queue. Messages are published persistent. Every endpoint declares the queues it uses, so start order doesn't matter.
 
 ### Consumes: job request (`video.jobs`)
 
@@ -127,7 +127,7 @@ Each job's output file is named `{file_id}.<ext>` — `file_id` is unique per jo
 
 Fired once per job, success or failure, right after the DB record is updated. Consumers must call back `GET /api/jobs/{file_id}` to learn the outcome (`ready`/`failed`, error, download URL) — the completion message intentionally carries nothing else.
 
-Both writer (`internal/kafka/producer.go`) and the job-request writers in the other two services set `AllowAutoTopicCreation: true`, since `kafka-go` does not request topic auto-creation by default even when the broker allows it.
+Publishing (`internal/mq/publisher.go`) is mutex-guarded and redials once on a dead channel; consuming (`internal/mq/consumer.go`) reconnects with a fixed backoff until its context is cancelled. A message is acked only after `HandleJobMessage` returns.
 
 ## Format standardization
 
@@ -155,9 +155,9 @@ Fully interactive, no flags:
 1. Enter a video URL.
 2. Choose a format from the menu — built-in presets (best/audio-only/1080p/720p/480p), any raw format from a table of everything yt-dlp reports for that URL, or manual format-ID entry (`137+140` syntax).
 3. Choose an output directory (default `./downloads`).
-4. File is saved as `<file_id>.<ext>`, where `file_id` is a freshly generated UUID (CLI mode has no Kafka job to inherit one from).
+4. File is saved as `<file_id>.<ext>`, where `file_id` is a freshly generated UUID (CLI mode has no queued job to inherit one from).
 
-This path is unrelated to the HTTP/Kafka API above — it calls `downloader.Download` directly and uses the separate `Predefined`/`ByKey`/`ParseCustom` helpers in `formats.go`, not the standardized-ladder functions.
+This path is unrelated to the HTTP/RabbitMQ API above — it calls `downloader.Download` directly and uses the separate `Predefined`/`ByKey`/`ParseCustom` helpers in `formats.go`, not the standardized-ladder functions.
 
 ## Download history
 
@@ -166,7 +166,7 @@ Every job (CLI or worker mode) is recorded in the SQLite database at `DB_PATH`:
 | Column | Description |
 |---|---|
 | `id` | Auto-increment integer |
-| `file_id` | UUID, public identifier used in URLs and Kafka messages |
+| `file_id` | UUID, public identifier used in URLs and queue messages |
 | `url` | Original video URL |
 | `title` | Video title from yt-dlp |
 | `format_arg` | yt-dlp `-f` selector actually used |
@@ -192,7 +192,7 @@ No external services needed — SQLite tests use a temp file per test, everythin
 
 Not covered by unit tests, since they shell out to `yt-dlp`/`ffmpeg`/`ffprobe` and aren't behind an injectable interface: `HandleJobMessage`, `handleFormats`, `downloader.FetchVideoInfo`/`Download` (codec probing/transcoding included). These are exercised by the end-to-end smoke test instead.
 
-For an end-to-end check against a real running stack (Kafka round trip, actual `yt-dlp`/`ffmpeg` invocation, real codec verification), see [the repo root's smoke test](../README.md#testing).
+For an end-to-end check against a real running stack (RabbitMQ round trip, actual `yt-dlp`/`ffmpeg` invocation, real codec verification), see [the repo root's smoke test](../README.md#testing).
 
 ## Project structure
 
@@ -201,7 +201,7 @@ For an end-to-end check against a real running stack (Kafka round trip, actual `
 ├── main.go                        # Entry point: CLI mode or -worker mode
 └── internal/
     ├── api/
-    │   ├── api.go                 # HTTP routes + Kafka job-message handler
+    │   ├── api.go                 # HTTP routes + queue job-message handler
     │   └── api_test.go
     ├── downloader/
     │   ├── downloader.go          # yt-dlp wrapper: metadata fetch + download
@@ -211,9 +211,10 @@ For an end-to-end check against a real running stack (Kafka round trip, actual `
     ├── fileserver/
     │   ├── server.go              # GET /files/{file_id}, GET /formats (containers)
     │   └── server_test.go
-    ├── kafka/
-    │   ├── consumer.go            # Job-request consumer
-    │   └── producer.go            # Completion-notification producer
+    ├── mq/
+    │   ├── mq.go                  # Queue names + durable-queue declare helper
+    │   ├── publisher.go           # Reconnecting persistent-message publisher
+    │   └── consumer.go            # Reconnecting queue consumer (prefetch 1)
     ├── storage/
     │   ├── db.go                  # SQLite: Open, Save, List, GetByID/FileID
     │   ├── db_test.go

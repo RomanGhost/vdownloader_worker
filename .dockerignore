@@ -1,6 +1,23 @@
-downloads.db
+# Keep the build context small and never ship local secrets / data into
+# the image. The Dockerfile only needs the Go sources + go.mod/go.sum.
+.env
+.env.example
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 downloads/
+
+# local build output
+downloader
+
+# docs / compose are not needed inside the image
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore
+.gitignore
+
+# local scratch
 gf
 out.txt
-*.db
-.env
