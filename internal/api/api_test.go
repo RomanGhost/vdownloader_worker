@@ -24,7 +24,7 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	noopPublish := func(context.Context, string) error { return nil }
+	noopPublish := func(context.Context, []byte) error { return nil }
 	return New(db, t.TempDir(), noopPublish, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 

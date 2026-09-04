@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/google/uuid"
@@ -16,7 +15,7 @@ import (
 	"downloader/internal/config"
 	"downloader/internal/downloader"
 	"downloader/internal/fileserver"
-	"downloader/internal/kafka"
+	"downloader/internal/mq"
 	"downloader/internal/storage"
 	"downloader/internal/ui"
 )
@@ -25,9 +24,7 @@ func main() {
 	cfg := config.Load()
 
 	workerMode := flag.Bool("worker", false, "run as background worker instead of interactive terminal")
-	kafkaBrokers := flag.String("kafka-brokers", cfg.KafkaBrokers, "comma-separated Kafka broker addresses (env: KAFKA_BROKERS)")
-	kafkaTopic := flag.String("kafka-topic", cfg.KafkaTopic, "Kafka topic for job completion notifications (env: KAFKA_TOPIC)")
-	kafkaJobsTopic := flag.String("kafka-jobs-topic", cfg.KafkaJobsTopic, "Kafka topic for incoming job requests (env: KAFKA_JOBS_TOPIC)")
+	rabbitURL := flag.String("rabbitmq-url", cfg.RabbitURL, "RabbitMQ connection URL (env: RABBITMQ_URL)")
 	outDir := flag.String("out", cfg.OutDir, "output directory for downloads (env: OUT_DIR)")
 	dbPath := flag.String("db", cfg.DBPath, "SQLite database file path (env: DB_PATH)")
 	fsAddr := flag.String("fs-addr", cfg.FileServerAddr, "HTTP server listen address (env: FILE_SERVER_ADDR)")
@@ -54,7 +51,7 @@ func main() {
 	}
 
 	if *workerMode {
-		runWorker(ctx, *kafkaBrokers, *kafkaTopic, *kafkaJobsTopic, *outDir, *fsAddr, db, logger)
+		runWorker(ctx, *rabbitURL, *outDir, *fsAddr, db, logger)
 		return
 	}
 
@@ -65,7 +62,7 @@ func main() {
 	}
 }
 
-func runWorker(ctx context.Context, kafkaBrokers, kafkaTopic, kafkaJobsTopic, outDir, fsAddr string, db *storage.DB, log *slog.Logger) {
+func runWorker(ctx context.Context, rabbitURL, outDir, fsAddr string, db *storage.DB, log *slog.Logger) {
 	if err := downloader.CheckDependency(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -74,27 +71,26 @@ func runWorker(ctx context.Context, kafkaBrokers, kafkaTopic, kafkaJobsTopic, ou
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	brokers := strings.Split(kafkaBrokers, ",")
+	publisher, err := mq.NewPublisher(rabbitURL, mq.QueueCompleted)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer publisher.Close()
 
-	producer := kafka.NewProducer(brokers, kafkaTopic)
-	defer producer.Close()
-
-	consumer := kafka.NewConsumer(brokers, kafkaJobsTopic, "vdownloader-worker")
-	defer consumer.Close()
+	consumer := mq.NewConsumer(rabbitURL, mq.QueueJobs, "vdownloader-worker")
 
 	fs := fileserver.New(fsAddr, db, log)
 
 	// Mount the REST API on the same mux as the file server.
-	apiSrv := api.New(db, outDir, producer.Publish, log)
+	apiSrv := api.New(db, outDir, publisher.Publish, log)
 	apiSrv.RegisterRoutes(fs.Mux())
 
 	fs.Start()
 
 	go consumer.Consume(ctx, log, apiSrv.HandleJobMessage)
 
-	log.Info("starting worker",
-		"kafka_brokers", kafkaBrokers, "kafka_topic", kafkaTopic, "kafka_jobs_topic", kafkaJobsTopic,
-		"out_dir", outDir)
+	log.Info("starting worker", "rabbitmq_url", rabbitURL, "out_dir", outDir)
 	<-ctx.Done()
 
 	shutCtx := context.Background()
