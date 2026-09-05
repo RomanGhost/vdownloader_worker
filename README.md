@@ -47,7 +47,7 @@ docker run -it -p 8080:8080 -v "$(pwd)/downloads:/downloads" \
   vdownloader-worker ./downloader -worker
 ```
 
-The image bundles yt-dlp and ffmpeg — no local dependencies needed. See the repo root [docker-compose.yml](../docker-compose.yml) to run it alongside RabbitMQ and the other two services.
+The image bundles yt-dlp and ffmpeg — no local dependencies needed. This repo's own [docker-compose.yml](docker-compose.yml) runs the worker alongside RabbitMQ standalone; to run it alongside the Telegram bot and web UI too, use the [docker-compose.yml in vdownloader_config](https://github.com/RomanGhost/vdownloader_config/blob/main/docker-compose.yml) (a separate repo — this service is one of four independent repos, see [vdownloader_config](https://github.com/RomanGhost/vdownloader_config) for how they fit together).
 
 ## HTTP API
 
@@ -196,7 +196,7 @@ No external services needed — SQLite tests use a temp file per test, everythin
 
 Not covered by unit tests, since they shell out to `yt-dlp`/`ffmpeg`/`ffprobe` and aren't behind an injectable interface: `HandleJobMessage`, `handleFormats`, `downloader.FetchVideoInfo`/`Download` (codec probing/transcoding included). These are exercised by the end-to-end smoke test instead.
 
-For an end-to-end check against a real running stack (RabbitMQ round trip, actual `yt-dlp`/`ffmpeg` invocation, real codec verification), see [the repo root's smoke test](../README.md#testing).
+For an end-to-end check against a real running stack (RabbitMQ round trip, actual `yt-dlp`/`ffmpeg` invocation, real codec verification), see the [smoke test in vdownloader_config](https://github.com/RomanGhost/vdownloader_config/blob/main/README.md#testing) (a separate repo that runs all four services together).
 
 ## Project structure
 
