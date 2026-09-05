@@ -176,6 +176,10 @@ Every job (CLI or worker mode) is recorded in the SQLite database at `DB_PATH`:
 | `error_msg` | Populated when `status == failed` |
 | `created_at` | Timestamp |
 
+## Known limitations
+
+- Downloaded files in `OUT_DIR` are kept forever — the worker never deletes them after serving. Disk usage grows unbounded with job volume. A follow-up will add a cap/quota on the number (or total size) of retained files, evicting the oldest once the limit is hit.
+
 ## Testing
 
 ```bash
